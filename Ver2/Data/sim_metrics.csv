@@ -1,0 +1,2 @@
+orders_total,orders_completed,lead_time_avg_h,lead_time_p90_h,lead_time_p95_h,lead_time_p99_h,locker_wait_avg_h,locker_full_events
+70189,34835,0.9612505695149782,1.153228659530089,1.2006995214531144,1.3045092182570273,0.0,0

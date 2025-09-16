@@ -1,0 +1,2 @@
+warehouse_id,name,lat,lon,processing_rate_per_hour,fixed_cost_sek,is_open
+W0,Existing Center,59.330000,18.060000,1200,0,1
