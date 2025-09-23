@@ -1,14 +1,18 @@
+#!/usr/bin/env python3
 """
-analyze_solution.py — Summarize & visualize facility-location results.
+analyze_solution.py — Summarize & visualize facility-location results (CFLP or UFLP).
 
-Inputs (defaults expect Results/ from optimize_real_sites.py):
-  --open     Results/open_decisions_CFLP.csv or open_decisions_UFLP.csv
-  --assign   Results/assignments_summary_CFLP.csv or assignments_summary_UFLP.csv
+You choose exactly which files to analyze (no guessing by mtime).
+
+Inputs (give explicit files; defaults point to CFLP):
+  --open     Results/open_decisions_CFLP.csv
+  --assign   Results/assignments_summary_CFLP.csv
   --lockers  Data/lockers_real.csv
   --outdir   Results
-  --suffix   (optional) force an output suffix, e.g. "_TEST". If omitted,
-             we auto-detect from --open/--assign filenames: "_UFLP" or "_CFLP".
-             If neither is found, no suffix is used.
+  --title    "Assignment"
+  --suffix   (optional) force output suffix, e.g. "_UFLP" or "_CFLP".
+             If omitted, we detect from --open/--assign filenames: "_UFLP" or "_CFLP".
+             If neither suffix is found, we use "" (no suffix).
 
 Outputs in --outdir (suffix auto-applied):
   - summary{SUFFIX}.txt
@@ -17,20 +21,22 @@ Outputs in --outdir (suffix auto-applied):
   - distance_hist{SUFFIX}.png
   - demand_share_bar{SUFFIX}.png
   - assignment_map{SUFFIX}.png
+  - late_by_warehouse{SUFFIX}.csv              <-- NEW
+  - late_stats{SUFFIX}.csv                     <-- NEW
 
-UFLP:
-python analyze_solution.py `
-  --open Results\open_decisions_UFLP.csv `
-  --assign Results\assignments_summary_UFLP.csv `
-  --lockers Data\lockers_real.csv `
-  --outdir Results
+UFLP example:
+  python analyze_solution.py ^
+    --open Results\\open_decisions_UFLP.csv ^
+    --assign Results\\assignments_summary_UFLP.csv ^
+    --lockers Data\\lockers_real.csv ^
+    --outdir Results
 
-CFLP:
-python analyze_solution.py `
-  --open Results\open_decisions_CFLP.csv `
-  --assign Results\assignments_summary_CFLP.csv `
-  --lockers Data\lockers_real.csv `
-  --outdir Results
+CFLP example:
+  python analyze_solution.py ^
+    --open Results\\open_decisions_CFLP.csv ^
+    --assign Results\\assignments_summary_CFLP.csv ^
+    --lockers Data\\lockers_real.csv ^
+    --outdir Results
 """
 
 from __future__ import annotations
@@ -46,7 +52,6 @@ def detect_suffix(*paths: str) -> str:
     for p in paths:
         m = pat.search(Path(p).name)
         if m:
-            # Normalize exact upper-case suffix
             return f"_{m.group(1).upper()}"
     return ""
 
@@ -66,28 +71,33 @@ def wavg(x, w):
     return float(np.nansum(x * w) / s)
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--open",   default="Results/open_decisions_CFLP.csv")
-    ap.add_argument("--assign", default="Results/assignments_summary_CFLP.csv")
-    ap.add_argument("--lockers", default="Data/lockers_real.csv")
-    ap.add_argument("--outdir", default="Results")
-    ap.add_argument("--title",  default="Assignment")
-    ap.add_argument("--suffix", default=None, help="Force output filename suffix, e.g. _UFLP or _CFLP")
+    ap = argparse.ArgumentParser(description="Analyze CFLP/UFLP results with lateness.")
+    ap.add_argument("--open",   default="Results/open_decisions_CFLP.csv",
+                    help="CSV with open/closed decisions (from optimize_real_sites.py).")
+    ap.add_argument("--assign", default="Results/assignments_summary_CFLP.csv",
+                    help="CSV with locker assignments (from optimize_real_sites.py).")
+    ap.add_argument("--lockers", default="Data/lockers_real.csv",
+                    help="CSV with locker coordinates (locker_id, lat, lon).")
+    ap.add_argument("--outdir", default="Results", help="Output folder.")
+    ap.add_argument("--title",  default="Assignment", help="Plot titles.")
+    ap.add_argument("--suffix", default=None,
+                    help="Force output filename suffix, e.g. _UFLP or _CFLP. If omitted, inferred from filenames.")
     args = ap.parse_args()
 
-    # Decide suffix
+    # Decide suffix (NO mtime heuristics; only explicit or filename-based)
     if args.suffix is not None:
         suffix = args.suffix if args.suffix.startswith("_") else "_" + args.suffix
     else:
-        suffix = detect_suffix(args.open, args.assign)
+        suffix = detect_suffix(args.open, args.assign)  # may be ""
 
     outdir = Path(args.outdir); outdir.mkdir(parents=True, exist_ok=True)
 
+    # Load inputs
     open_df = pd.read_csv(args.open)
     asg = pd.read_csv(args.assign)
     lockers = pd.read_csv(args.lockers)
 
-    # Standardize / join locker coords
+    # Standardize/join locker coords
     lid = pick(lockers, ["locker_id","id"])
     lat = pick(lockers, ["lat","latitude"])
     lon = pick(lockers, ["lon","longitude"])
@@ -96,8 +106,13 @@ def main():
     lockers_std = lockers[[lid, lat, lon]].copy()
     lockers_std.columns = ["locker_id","lat","lon"]
 
-    asg["demand"] = asg["demand"].fillna(0.0)
-    asg["km_to_assigned"] = asg["km_to_assigned"].astype(float)
+    # Clean assignment inputs
+    asg["demand"] = asg.get("demand", 0.0).fillna(0.0)
+    # assure km numeric
+    if "km_to_assigned" in asg.columns:
+        asg["km_to_assigned"] = pd.to_numeric(asg["km_to_assigned"], errors="coerce")
+    else:
+        asg["km_to_assigned"] = np.nan
     asg = asg.merge(lockers_std, on="locker_id", how="left")
 
     # What opened?
@@ -114,11 +129,9 @@ def main():
     dem_by_wh.to_csv(outdir / f"demand_by_warehouse{suffix}.csv", index=False)
 
     # Distance stats by warehouse (demand-weighted)
-    # Use repetition for median/p95 on integer-approx weights (clip lower=1 to avoid zero-repeat)
     def med_p95(group):
         km = group["km_to_assigned"].values
         wt = group["demand"].astype(int).clip(lower=1).values
-        # expand cautiously: for large counts it's still fine because per-locker demand is modest
         expanded = np.repeat(km, wt)
         return pd.Series({
             "demand": group["demand"].sum(),
@@ -132,8 +145,44 @@ def main():
                .sort_values("demand", ascending=False))
     stats.to_csv(outdir / f"distance_stats{suffix}.csv", index=False)
 
+    # ------- Lateness (NEW) -------
+    # We support three cases, in priority order:
+    #  1) assignments_summary has 'expected_late_orders' (preferred).
+    #  2) else, assignments_summary has 'assigned_p_late' -> compute demand * p_late.
+    #  3) else, open_decisions has 'p_late' mapped by assigned warehouse -> compute.
+    have_expected = "expected_late_orders" in asg.columns
+    have_p_late_asg = "assigned_p_late" in asg.columns
+    have_p_late_open = "p_late" in open_df.columns
+
+    if have_expected:
+        asg["expected_late_orders"] = pd.to_numeric(asg["expected_late_orders"], errors="coerce").fillna(0.0)
+    elif have_p_late_asg:
+        asg["assigned_p_late"] = pd.to_numeric(asg["assigned_p_late"], errors="coerce")
+        asg["expected_late_orders"] = (asg["assigned_p_late"].fillna(0.0) * asg["demand"].astype(float))
+    elif have_p_late_open:
+        p_map = dict(zip(open_df["warehouse_id"].astype(str), pd.to_numeric(open_df["p_late"], errors="coerce")))
+        asg["assigned_p_late"] = asg["assigned_warehouse_id"].astype(str).map(p_map)
+        asg["expected_late_orders"] = (asg["assigned_p_late"].fillna(0.0) * asg["demand"].astype(float))
+    else:
+        asg["expected_late_orders"] = 0.0  # unknown -> treat as 0; we note it in the summary.
+
+    late_by_wh = (asg.groupby(["assigned_warehouse_id","assigned_warehouse_name"], as_index=False)
+                    .agg(demand=("demand","sum"),
+                         expected_late_orders=("expected_late_orders","sum")))
+    # simple late rate (guard divide-by-zero)
+    late_by_wh["late_rate"] = np.where(
+        late_by_wh["demand"] > 0,
+        late_by_wh["expected_late_orders"] / late_by_wh["demand"],
+        np.nan
+    )
+    late_by_wh = late_by_wh.sort_values(["expected_late_orders","demand"], ascending=[False, False])
+    late_by_wh.to_csv(outdir / f"late_by_warehouse{suffix}.csv", index=False)
+
+    total_demand = float(asg["demand"].sum())
+    total_expected_late = float(asg["expected_late_orders"].sum())
+    overall_late_rate = (total_expected_late / total_demand) if total_demand > 0 else float("nan")
+
     # Human-readable summary
-    total_demand = asg["demand"].sum()
     wavg_km_all = wavg(asg["km_to_assigned"], asg["demand"])
     expanded_all = np.repeat(asg["km_to_assigned"].fillna(0).values,
                              asg["demand"].astype(int).clip(lower=1).values)
@@ -144,10 +193,18 @@ def main():
     lines.append(f"Total demand served (orders): {int(total_demand)}")
     lines.append(f"Demand-weighted avg distance (km): {wavg_km_all:.2f}")
     lines.append(f"95th percentile distance (km): {p95_all:.2f}")
+    lines.append(f"Expected late orders (total): {int(round(total_expected_late))}")
+    lines.append(f"Expected late rate (share of demand): {overall_late_rate:.3%}")
     lines.append("")
     lines.append("Top warehouses by demand served:")
     for _, r in dem_by_wh.head(10).iterrows():
         lines.append(f"  - {r['assigned_warehouse_name']} ({r['assigned_warehouse_id']}): {int(r['demand'])} orders")
+    lines.append("")
+    lines.append("Top warehouses by expected late orders:")
+    for _, r in late_by_wh.head(10).iterrows():
+        lines.append(f"  - {r['assigned_warehouse_name']} ({r['assigned_warehouse_id']}): "
+                     f"{int(round(r['expected_late_orders']))} late / {int(r['demand'])} orders "
+                     f"({(r['late_rate'] if pd.notna(r['late_rate']) else 0.0):.2%})")
     lines.append("")
     if len(stats):
         closest = stats.sort_values("avg_km").iloc[0]
@@ -155,7 +212,15 @@ def main():
         lines.append(f"Closest performer (by avg km): {closest['assigned_warehouse_name']} avg {closest['avg_km']:.2f} km")
         lines.append(f"Farthest performer (by avg km): {farthest['assigned_warehouse_name']} avg {farthest['avg_km']:.2f} km")
 
-    (outdir / f"summary{suffix}.txt").write_text("\n".join(lines), encoding="utf-8")
+    f_summary = outdir / f"summary{suffix}.txt"
+    f_summary.write_text("\n".join(lines), encoding="utf-8")
+
+    # Save late_stats (one-line aggregate)
+    pd.DataFrame([{
+        "total_demand": int(total_demand),
+        "total_expected_late": float(total_expected_late),
+        "overall_late_rate": float(overall_late_rate),
+    }]).to_csv(outdir / f"late_stats{suffix}.csv", index=False)
 
     # ---------- Plots (matplotlib only, no seaborn) ----------
     import matplotlib.pyplot as plt
@@ -209,7 +274,6 @@ def main():
         ).to_crs(epsg=3857)
 
         bounds = gdf_lk.total_bounds
-        import matplotlib.pyplot as plt
         fig, ax = plt.subplots(figsize=(10,10))
         padx = (bounds[2]-bounds[0])*0.08 or 1000
         pady = (bounds[3]-bounds[1])*0.08 or 1000

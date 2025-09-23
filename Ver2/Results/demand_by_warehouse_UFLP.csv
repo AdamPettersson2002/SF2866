@@ -1,2 +1,2 @@
-assigned_warehouse_id,assigned_warehouse_name,demand
-NW_1,Barkarby Hub,50000.0
+warehouse_id,demand,warehouse_name
+NW_1,50000.0,Barkarby Hub

@@ -1,10 +1,6 @@
+Mode: UFLP
 Opened new candidates: 1 -> ['NW_1']
 Total demand served (orders): 50000
-Demand-weighted avg distance (km): 14.47
-95th percentile distance (km): 16.79
 
 Top warehouses by demand served:
   - Barkarby Hub (NW_1): 50000 orders
-
-Closest performer (by avg km): Barkarby Hub avg 14.47 km
-Farthest performer (by avg km): Barkarby Hub avg 14.47 km
