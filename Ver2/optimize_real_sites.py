@@ -18,7 +18,9 @@ python optimize_real_sites.py `
   --orders Data\orders_real.csv `
   --veh-cost-per-km 10 `
   --hours-per-day 24 --days 14 `
-  --max-new 1 `
+  --amort-years 7 `
+  --amortize-from-orders `
+  --max-new 2 `
   --out-dir Results
 
 UFLP:
@@ -42,6 +44,17 @@ from typing import Dict, Tuple, List
 import math, re
 import pandas as pd
 import pulp
+
+
+def to_frac(v):
+    """Turn 92 or '92%' -> 0.92; 0.92 stays 0.92; invalid -> 0."""
+    if pd.isna(v): return 0.0
+    s = str(v).strip().replace("%","")
+    try:
+        x = float(s)
+    except:
+        return 0.0
+    return x/100.0 if x > 1.0 else x
 
 
 def norm(s: str) -> str:
@@ -271,17 +284,69 @@ def main():
     ap.add_argument("--write-flows", action="store_true")
     ap.add_argument("--uncapacitated", action="store_true", help="Ignore capacity limits (UFLP).")
     ap.add_argument("--out-dir", default="Results")
-    ap.add_argument("--amort-years", type=float, default=None, help="If set, convert CAPEX to an amortized fixed cost over the horizon: CAPEX/amort_years * days/365.")
+    ap.add_argument("--amort-years", type=float, default=None,
+                    help="Amortize CAPEX over this many years: CAPEX/amort_years * (days/365).")
+    ap.add_argument("--amortize-from-orders", action="store_true",
+                    help="Infer days from min/max order timestamps (overrides --days for amortization only).")
+    ap.add_argument("--capacity-col", default=None,
+                    help="Use this warehouse column as the TOTAL horizon capacity (overrides rate-based capacity).")
+    ap.add_argument("--utilization-col", default=None,
+                    help="Warehouse utilization column; capacity is scaled by (1 - utilization).")
+    ap.add_argument("--utilization-applies", choices=["existing", "all"], default="existing",
+                    help="Apply utilization scaling to existing sites only (default) or all sites.")
+
     args = ap.parse_args()
 
     out_dir = Path(args.out_dir)
     wh = load_warehouses(Path(args.wh_existing), Path(args.wh_candidates),
                          hours_per_day=args.hours_per_day, days=args.days)
+
+    # Load lockers + demand
+    lk, demand = load_lockers_and_demand(Path(args.lockers), Path(args.orders))
+
+    amort_days = args.days
+    if args.amortize_from_orders:
+        od = pd.read_csv(args.orders)
+        # try to find a timestamp column
+        ts_col = None
+        for c in od.columns:
+            cl = c.lower()
+            if "time" in cl or "date" in cl:
+                ts_col = c;
+                break
+        if ts_col is None:
+            raise SystemExit("Could not find a timestamp column in orders for --amortize-from-orders.")
+        ts = pd.to_datetime(od[ts_col], errors="coerce")
+        ts = ts.dropna()
+        if len(ts) == 0:
+            raise SystemExit("No parseable timestamps found in orders for --amortize-from-orders.")
+        span_days = (ts.max().normalize() - ts.min().normalize()).days + 1
+        amort_days = max(1, span_days)
+
     if args.amort_years and args.amort_years > 0:
-        factor = (args.days / 365.0) / args.amort_years
+        factor = (amort_days / 365.0) / float(args.amort_years)
         wh["fixed_cost_sek"] = (wh["fixed_cost_sek"].astype(float) * factor).round(2)
 
-    lk, demand = load_lockers_and_demand(Path(args.lockers), Path(args.orders))
+    if args.capacity_col:
+        col = args.capacity_col
+        if col not in wh.columns:
+            raise SystemExit(f"--capacity-col '{col}' not found. Columns: {list(wh.columns)}")
+        cap_override = pd.to_numeric(wh[col], errors="coerce")
+        wh["capacity"] = cap_override.where(cap_override.notna(), wh["capacity"]).astype(float)
+
+    # Optionally scale capacity by (1 - utilization)
+    if args.utilization_col:
+        ucol = args.utilization_col
+        if ucol not in wh.columns:
+            raise SystemExit(f"--utilization-col '{ucol}' not found. Columns: {list(wh.columns)}")
+        util = wh[ucol].apply(to_frac).clip(lower=0.0, upper=1.0)
+        free_frac = (1.0 - util)
+        if args.utilization_applies == "existing":
+            mask = (wh["is_existing"] == 1)
+            wh.loc[mask, "capacity"] = (wh.loc[mask, "capacity"].astype(float) * free_frac[mask]).round(2)
+        else:
+            wh["capacity"] = (wh["capacity"].astype(float) * free_frac).round(2)
+
 
     build_and_solve(wh, lk, demand,
                     veh_cost_per_km=args.veh_cost_per_km,

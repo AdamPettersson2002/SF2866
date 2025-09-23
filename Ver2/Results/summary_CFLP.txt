@@ -1,10 +1,11 @@
-Opened new candidates: 1 -> ['NW_1']
+Opened new candidates: 2 -> ['NW_1', 'NW_6']
 Total demand served (orders): 50000
-Demand-weighted avg distance (km): 14.47
-95th percentile distance (km): 16.79
+Demand-weighted avg distance (km): 13.55
+95th percentile distance (km): 15.14
 
 Top warehouses by demand served:
-  - Barkarby Hub (NW_1): 50000 orders
+  - Barkarby Hub (NW_1): 27396 orders
+  - Tyresö Depot (NW_6): 22604 orders
 
-Closest performer (by avg km): Barkarby Hub avg 14.47 km
-Farthest performer (by avg km): Barkarby Hub avg 14.47 km
+Closest performer (by avg km): Barkarby Hub avg 13.18 km
+Farthest performer (by avg km): Tyresö Depot avg 14.01 km
