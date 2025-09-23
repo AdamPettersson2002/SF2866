@@ -32,10 +32,10 @@ UFLP example:
     --outdir Results
 
 CFLP example:
-  python analyze_solution.py ^
-    --open Results\\open_decisions_CFLP.csv ^
-    --assign Results\\assignments_summary_CFLP.csv ^
-    --lockers Data\\lockers_real.csv ^
+  python analyze_solution.py `
+    --open Results\\open_decisions_CFLP.csv `
+    --assign Results\\assignments_summary_CFLP.csv `
+    --lockers Data\\lockers_real.csv `
     --outdir Results
 """
 
@@ -211,6 +211,19 @@ def main():
         farthest = stats.sort_values("avg_km").iloc[-1]
         lines.append(f"Closest performer (by avg km): {closest['assigned_warehouse_name']} avg {closest['avg_km']:.2f} km")
         lines.append(f"Farthest performer (by avg km): {farthest['assigned_warehouse_name']} avg {farthest['avg_km']:.2f} km")
+
+    obj_path = outdir / f"objective_breakdown{suffix}.csv"
+    if obj_path.exists():
+        obj = pd.read_csv(obj_path).iloc[0]
+        lines.append("")
+        lines.append("Objective breakdown (SEK):")
+        lines.append(f"  - Fixed cost: {obj['fixed_cost_sek']:,.2f}")
+        lines.append(f"  - Transport cost: {obj['transport_cost_sek']:,.2f}")
+        lines.append(f"  - Late orders (expected): {int(round(obj['late_orders_expected']))}")
+        lines.append(
+            f"  - Late penalty (@ {obj['late_penalty_per_order']:,.0f} SEK/order): {obj['late_penalty_sek']:,.2f}")
+        lines.append(f"  => Total objective: {obj['objective_total_sek']:,.2f}")
+
 
     f_summary = outdir / f"summary{suffix}.txt"
     f_summary.write_text("\n".join(lines), encoding="utf-8")

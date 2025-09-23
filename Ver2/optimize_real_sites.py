@@ -18,9 +18,10 @@ python optimize_real_sites.py `
   --orders Data\orders_real.csv `
   --veh-cost-per-km 10 `
   --hours-per-day 24 --days 14 `
-  --amort-years 7 `
-  --amortize-from-orders `
+  --amort-years 7 --amortize-from-orders `
   --max-new 2 `
+  --late-penalty 2000  `
+  --late-default-rate 0.10 `
   --write-flows `
   --out-dir Results
 
@@ -172,32 +173,42 @@ def load_lockers_and_demand(lockers_csv: Path, orders_csv: Path) -> Tuple[pd.Dat
 
 def build_and_solve(wh, lk, demand,
                     veh_cost_per_km, max_new, max_km, solver_time_limit, write_flows,
-                    out_dir, uncapacitated):
+                    out_dir, uncapacitated,
+                    late_penalty=0.0, late_default_rate=0.0):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     mode_suffix = "_UFLP" if uncapacitated else "_CFLP"
     fn_open   = out_dir / f"open_decisions{mode_suffix}.csv"
     fn_assign = out_dir / f"assignments_summary{mode_suffix}.csv"
     fn_flows  = out_dir / f"flows{mode_suffix}.csv"
-    fn_late   = out_dir / f"late_stats{mode_suffix}.csv"
 
-    # --- Index sets
     warehouses = wh["warehouse_id"].astype(str).tolist()
-    lockers    = lk["locker_id"].astype(str).tolist()
+    lockers = lk["locker_id"].astype(str).tolist()
 
-    # --- Lookups
-    wh_pos    = {row["warehouse_id"]: (float(row["lat"]), float(row["lon"])) for _, row in wh.iterrows()}
-    lk_pos    = {row["locker_id"]: (float(row["lat"]), float(row["lon"])) for _, row in lk.iterrows()}
-    wh_name   = dict(zip(wh["warehouse_id"].astype(str), wh["name"].astype(str)))
-    wh_fix    = dict(zip(wh["warehouse_id"].astype(str), wh["fixed_cost_sek"].astype(float)))
-    wh_cap    = dict(zip(wh["warehouse_id"].astype(str), wh["capacity"].astype(float)))
-    wh_exist  = dict(zip(wh["warehouse_id"].astype(str), wh["is_existing"].astype(int)))
-    wh_on_time= dict(zip(wh["warehouse_id"].astype(str), wh.get("on_time_rate", pd.Series([np.nan]*len(wh))).astype(float)))
-    wh_p_late = dict(zip(wh["warehouse_id"].astype(str), wh.get("p_late", pd.Series([np.nan]*len(wh))).astype(float)))
+    wh_pos   = {row["warehouse_id"]: (float(row["lat"]), float(row["lon"])) for _, row in wh.iterrows()}
+    lk_pos   = {row["locker_id"]:   (float(row["lat"]), float(row["lon"])) for _, row in lk.iterrows()}
+    wh_name  = dict(zip(wh["warehouse_id"].astype(str), wh["name"].astype(str)))
+    wh_fix   = dict(zip(wh["warehouse_id"].astype(str), wh["fixed_cost_sek"].astype(float)))
+    wh_cap   = dict(zip(wh["warehouse_id"].astype(str), wh["capacity"].astype(float)))
+    wh_exist = dict(zip(wh["warehouse_id"].astype(str), wh["is_existing"].astype(int)))
 
-    # --- Feasible edges & costs
+    # on-time and lateness
+    wh_on_time = dict(zip(wh["warehouse_id"].astype(str), wh.get("on_time_rate", pd.Series([np.nan]*len(wh))).values))
+    wh_p_late  = dict(zip(wh["warehouse_id"].astype(str), wh.get("p_late",      pd.Series([np.nan]*len(wh))).values))
+
+    # Effective p_late used in the objective (fallback to late_default_rate if NaN)
+    p_late_eff = {}
+    for j in warehouses:
+        pj = wh_p_late.get(j, np.nan)
+        if pd.isna(pj):
+            pj = float(late_default_rate)
+        pj = min(max(pj, 0.0), 1.0)
+        p_late_eff[j] = pj
+
+    # Build feasible (i,j) edges and costs
     pair_list = []
-    dist_km, cost_ij = {}, {}
+    dist_km, cost_ij, late_cost_ij = {}, {}, {}
+
     for i in lockers:
         lat_i, lon_i = lk_pos[i]
         for j in warehouses:
@@ -209,31 +220,32 @@ def build_and_solve(wh, lk, demand,
                 continue
             pair = (i, j)
             pair_list.append(pair)
-            dist_km[pair] = dkm
-            cost_ij[pair] = veh_cost_per_km * dkm
+            dist_km[pair]   = dkm
+            cost_ij[pair]   = veh_cost_per_km * dkm
+            # lateness penalty: L (SEK per late order) * p_late(j) per unit of flow x_ij
+            late_cost_ij[pair] = late_penalty * p_late_eff[j]
 
-    # --- Model
+    # Model
     prob = pulp.LpProblem("FacilityLocation", pulp.LpMinimize)
 
-    # y_j: open/close (existing forced open)
-    y = {
-        j: (pulp.LpVariable(f"y_{j}", lowBound=1, upBound=1, cat="Binary") if wh_exist[j] == 1
-            else pulp.LpVariable(f"y_{j}", lowBound=0, upBound=1, cat="Binary"))
-        for j in warehouses
-    }
-    # x_ij: flow from warehouse j to locker i
-    x = { (i,j): pulp.LpVariable(f"x_{i}_{j}", lowBound=0, cat="Continuous") for (i,j) in pair_list }
+    # Variables
+    y = {j: pulp.LpVariable(f"y_{j}", lowBound=1, upBound=1, cat="Binary") if wh_exist[j] == 1
+         else pulp.LpVariable(f"y_{j}", lowBound=0, upBound=1, cat="Binary")
+         for j in warehouses}
+    x = {(i,j): pulp.LpVariable(f"x_{i}_{j}", lowBound=0, cat="Continuous") for (i,j) in pair_list}
 
-    # Objective: fixed + transport
-    prob += pulp.lpSum(wh_fix[j] * y[j] for j in warehouses) + \
-            pulp.lpSum(cost_ij[(i,j)] * x[(i,j)] for (i,j) in pair_list)
+    # Objective = fixed + transport + lateness penalty
+    prob += (
+        pulp.lpSum(wh_fix[j] * y[j] for j in warehouses) +
+        pulp.lpSum((cost_ij[(i,j)] + late_cost_ij[(i,j)]) * x[(i,j)] for (i,j) in pair_list)
+    )
 
-    # Demand coverage per locker
+    # Demand coverage
     for i in lockers:
         pairs_i = [(ii,j) for (ii,j) in pair_list if ii == i]
         prob += pulp.lpSum(x[(i,j)] for (i,j) in pairs_i) == float(demand.get(i, 0.0)), f"demand_{i}"
 
-    # Linking: x_ij <= demand_i * y_j
+    # Linking
     for (i,j) in pair_list:
         Mi = float(demand.get(i, 0.0))
         prob += x[(i,j)] <= Mi * y[j], f"link_{i}_{j}"
@@ -244,7 +256,7 @@ def build_and_solve(wh, lk, demand,
             pairs_j = [(i,jj) for (i,jj) in pair_list if jj == j]
             prob += pulp.lpSum(x[(i,j)] for (i,j) in pairs_j) <= wh_cap[j] * y[j], f"cap_{j}"
 
-    # Limit number of new sites (optional)
+    # Optional: cap number of new sites
     if max_new is not None:
         prob += pulp.lpSum(y[j] for j in warehouses if wh_exist[j] == 0) <= int(max_new), "max_new_sites"
 
@@ -257,7 +269,7 @@ def build_and_solve(wh, lk, demand,
     print(f"Status: {status}")
     print(f"Objective (SEK): {obj:,.2f}")
 
-    # --- Build open rows (we will fill expected_late later)
+    # Decisions (include p_late and effective_p_late)
     open_rows = []
     for j in warehouses:
         v = y[j].value()
@@ -273,81 +285,56 @@ def build_and_solve(wh, lk, demand,
             "lon": wh_pos[j][1],
             "on_time_rate": wh_on_time.get(j, np.nan),
             "p_late": wh_p_late.get(j, np.nan),
-            "expected_late_orders": 0.0,  # placeholder (filled below)
+            "p_late_effective": p_late_eff[j],
         })
+    open_df = pd.DataFrame(open_rows)
+    open_df.to_csv(fn_open, index=False)
 
-    # --- Flows (edge-level) incl. lateness
+    # Flows + expected lateness (+ cost)
     flows = pd.DataFrame([
         {
-            "locker_id": i,
-            "warehouse_id": j,
+            "locker_id": i, "warehouse_id": j,
             "flow": float(x[(i, j)].value() or 0.0),
             "km": dist_km[(i, j)],
-            "on_time_rate": wh_on_time.get(j, np.nan),
-            "p_late": wh_p_late.get(j, np.nan),
+            "p_late_effective": p_late_eff[j],
         }
         for (i, j) in pair_list
     ])
-    # Expected late per edge (treat NaN p_late as 0 here)
-    flows["expected_late"] = flows.apply(
-        lambda r: (0.0 if pd.isna(r["p_late"]) else r["p_late"]) * r["flow"], axis=1
-    )
-    if write_flows:
-        flows.to_csv(fn_flows, index=False)
+    flows["expected_late"] = flows["p_late_effective"] * flows["flow"]
+    flows["expected_late_cost"] = late_penalty * flows["expected_late"]
 
-    # --- Assignment summary (locker-level, winner-take-most)
+    # Locker-level assignment summary (same as before + lateness columns)
     flows_by_locker = flows.groupby("locker_id")["flow"].sum().reset_index().rename(columns={"flow":"demand"})
-    # If some lockers had no feasible edges, protect idxmax:
-    if len(flows) > 0:
-        idx = flows.groupby("locker_id")["flow"].idxmax()
-        best = flows.loc[idx, ["locker_id","warehouse_id","km"]].rename(
-            columns={"warehouse_id":"assigned_warehouse_id", "km":"km_to_assigned"}
-        )
-    else:
-        best = pd.DataFrame(columns=["locker_id","assigned_warehouse_id","km_to_assigned"])
-
-    assign = best.merge(flows_by_locker, on="locker_id", how="right")
-    assign["assigned_warehouse_name"] = assign["assigned_warehouse_id"].map(wh_name)
-    assign["assigned_on_time_rate"]   = assign["assigned_warehouse_id"].map(wh_on_time)
-    assign["assigned_p_late"]         = assign["assigned_warehouse_id"].map(wh_p_late)
-    assign["expected_late_orders"]    = assign.apply(
-        lambda r: (0.0 if pd.isna(r["assigned_p_late"]) else r["assigned_p_late"]) * (r["demand"] if pd.notna(r["demand"]) else 0.0),
-        axis=1
+    idx = flows.groupby("locker_id")["flow"].idxmax()
+    best = flows.loc[idx, ["locker_id","warehouse_id","km","p_late_effective"]].rename(
+        columns={"warehouse_id":"assigned_warehouse_id",
+                 "km":"km_to_assigned",
+                 "p_late_effective":"assigned_p_late"}
     )
+    assign = best.merge(flows_by_locker, on="locker_id", how="left")
+    assign["assigned_warehouse_name"] = assign["assigned_warehouse_id"].map(wh_name)
+    assign["expected_late_orders"] = assign["assigned_p_late"] * assign["demand"]
+    assign["expected_late_cost"]   = late_penalty * assign["expected_late_orders"]
     assign = assign[[
-        "locker_id", "assigned_warehouse_id", "assigned_warehouse_name",
-        "demand", "km_to_assigned",
-        "assigned_on_time_rate", "assigned_p_late", "expected_late_orders"
+        "locker_id","assigned_warehouse_id","assigned_warehouse_name",
+        "demand","km_to_assigned",
+        "assigned_p_late","expected_late_orders","expected_late_cost"
     ]]
     assign.to_csv(fn_assign, index=False)
 
-    # --- Fill expected late per warehouse & write open_decisions
-    late_by_wh = flows.groupby("warehouse_id")["expected_late"].sum().reset_index()
+    if write_flows:
+        flows.to_csv(fn_flows, index=False)
 
-    open_df = pd.DataFrame(open_rows)
-
-    # map aggregated lateness into the placeholder (avoid duplicate columns)
-    late_map = dict(zip(late_by_wh["warehouse_id"], late_by_wh["expected_late"]))
-    open_df["expected_late_orders"] = open_df["warehouse_id"].map(late_map).fillna(0.0).astype(float)
-
-    open_df.to_csv(fn_open, index=False)
-
-    # --- Overall late stats
-    served_total = float(flows["flow"].sum()) if len(flows) else 0.0
-    late_total = float(open_df["expected_late_orders"].sum())  # now a clean float Series
-    pd.DataFrame([{
-        "mode": "UFLP" if uncapacitated else "CFLP",
-        "total_orders_served": served_total,
-        "total_expected_late": late_total,
-        "overall_expected_late_rate": (late_total / served_total) if served_total > 0 else np.nan,
-    }]).to_csv(fn_late, index=False)
-
-    # --- Console summary
+    # Quick print
+    total_demand = float(assign["demand"].sum())
+    total_late   = float(assign["expected_late_orders"].sum())
+    total_late_cost = float(assign["expected_late_cost"].sum())
     open_new = open_df[(open_df["is_existing"]==0) & (open_df["open"]==1)]
     print(f"Opened {len(open_new)} new site(s): {', '.join(open_new['warehouse_id'].tolist()) if len(open_new) else '(none)'}")
+    print(f"Expected late orders (total): {int(round(total_late))}  → penalty cost: {total_late_cost:,.2f} SEK")
     print(f"Wrote: {fn_open.name}, {fn_assign.name}" + (f", {fn_flows.name}" if write_flows else ""))
-    print(f"Wrote: {fn_late.name}")
     return status, obj
+
 
 
 # ---------- CLI ----------
@@ -377,6 +364,10 @@ def main():
                     help="Warehouse utilization column; capacity is scaled by (1 - utilization).")
     ap.add_argument("--utilization-applies", choices=["existing", "all"], default="existing",
                     help="Apply utilization scaling to existing sites only (default) or all sites.")
+    ap.add_argument("--late-penalty", type=float, default=0.0,
+                    help="SEK cost per late order (default 0 = ignore lateness in objective).")
+    ap.add_argument("--late-default-rate", type=float, default=0.0,
+                    help="Fallback p_late used if a warehouse has no on-time rate (0..1).")
 
     args = ap.parse_args()
 
@@ -430,7 +421,6 @@ def main():
         else:
             wh["capacity"] = (wh["capacity"].astype(float) * free_frac).round(2)
 
-
     build_and_solve(wh, lk, demand,
                     veh_cost_per_km=args.veh_cost_per_km,
                     max_new=args.max_new,
@@ -438,7 +428,10 @@ def main():
                     solver_time_limit=args.time_limit,
                     write_flows=args.write_flows,
                     out_dir=out_dir,
-                    uncapacitated=args.uncapacitated)
+                    uncapacitated=args.uncapacitated,
+                    late_penalty=args.late_penalty,
+                    late_default_rate=args.late_default_rate)
+
 
 if __name__ == "__main__":
     main()

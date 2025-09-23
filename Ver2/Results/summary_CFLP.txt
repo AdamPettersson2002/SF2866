@@ -1,17 +1,17 @@
-Opened new candidates: 2 -> ['NW_1', 'NW_6']
+Opened new candidates: 2 -> ['NW_1', 'NW_3']
 Total demand served (orders): 50000
-Demand-weighted avg distance (km): 13.55
-95th percentile distance (km): 15.14
-Expected late orders (total): 3140
-Expected late rate (share of demand): 6.280%
+Demand-weighted avg distance (km): 14.85
+95th percentile distance (km): 18.00
+Expected late orders (total): 1975
+Expected late rate (share of demand): 3.951%
 
 Top warehouses by demand served:
-  - Barkarby Hub (NW_1): 27396 orders
-  - Tyresö Depot (NW_6): 22604 orders
+  - Barkarby Hub (NW_1): 32190 orders
+  - Sollentuna FC (NW_3): 17810 orders
 
 Top warehouses by expected late orders:
-  - Tyresö Depot (NW_6): 1989 late / 22604 orders (8.80%)
-  - Barkarby Hub (NW_1): 1151 late / 27396 orders (4.20%)
+  - Barkarby Hub (NW_1): 1352 late / 32190 orders (4.20%)
+  - Sollentuna FC (NW_3): 623 late / 17810 orders (3.50%)
 
-Closest performer (by avg km): Barkarby Hub avg 13.18 km
-Farthest performer (by avg km): Tyresö Depot avg 14.01 km
+Closest performer (by avg km): Barkarby Hub avg 14.12 km
+Farthest performer (by avg km): Sollentuna FC avg 16.17 km
