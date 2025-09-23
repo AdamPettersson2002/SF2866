@@ -1,0 +1,3 @@
+ID,Warehouse Name,Latitude,Longitude,Code,Area (m²),Capacity (units),Storage Utilization (%),Order Processing Time (hr),Transit Time (hr),Final Delivery Window (hr),Order Cycle Time (hr),On-Time Delivery Rate (%),Receiving Efficiency (items/hr),Put-Away Time (min),Dock-to-Stock Time (hr),Stock-to-Dock Time (hr),Backorder Rate (%),Monthly OPEX (SEK)
+EW_1,Stockholm Hub,59.5095082190748,17.734396585524284,ARN7,"5,000","250,000",92,2,1.5,8,6.5,96.2,320,18,4.2,2.5,3.5,"4,500,000"
+EW_2,Eskilstuna FC,59.34404968053245,16.694307649744268,ARN1,"15,000","750,000",97,3.5,4,14,12,91.5,280,25,5.1,4.8,5.8,"9,500,000"

@@ -1,0 +1,2 @@
+assigned_warehouse_id,assigned_warehouse_name,demand,avg_km,median_km,p95_km
+NW_1,Barkarby Hub,50000.0,14.470602894506118,14.939283026544397,16.785164361793502

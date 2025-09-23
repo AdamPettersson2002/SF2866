@@ -1,0 +1,296 @@
+"""
+optimize_real_sites.py — Facility location on real data (CFLP / UFLP).
+
+- Capacitated mode (default): capacity = processing_rate_per_hour * hours_per_day * days
+- Uncapacitated mode (--uncapacitated): NO capacity limits, but we STILL enforce the
+  linking constraint: x_ij ≤ d_i * y_j (prevents shipping to closed facilities).
+
+Outputs (to --out-dir, default Results/):
+  - open_decisions_CFLP.csv or open_decisions_UFLP.csv
+  - assignments_summary_CFLP.csv or assignments_summary_UFLP.csv
+  - (optional) flows_CFLP.csv or flows_UFLP.csv  with --write-flows
+
+CLFP:
+python optimize_real_sites.py `
+  --wh-existing Data\warehouses_existing_real.csv `
+  --wh-candidates Data\warehouse_candidates_real.csv `
+  --lockers Data\lockers_real.csv `
+  --orders Data\orders_real.csv `
+  --veh-cost-per-km 10 `
+  --hours-per-day 24 --days 14 `
+  --max-new 1 `
+  --out-dir Results
+
+UFLP:
+python optimize_real_sites.py `
+  --wh-existing Data\warehouses_existing_real.csv `
+  --wh-candidates Data\warehouse_candidates_real.csv `
+  --lockers Data\lockers_real.csv `
+  --orders Data\orders_real.csv `
+  --veh-cost-per-km 10 `
+  --hours-per-day 24 --days 14 `
+  --max-new 1 `
+  --uncapacitated `
+  --amort-years 7 `
+  --out-dir Results
+"""
+
+from __future__ import annotations
+import argparse
+from pathlib import Path
+from typing import Dict, Tuple, List
+import math, re
+import pandas as pd
+import pulp
+
+
+def norm(s: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '', str(s).lower().strip())
+
+def find_col(df: pd.DataFrame, aliases) -> str | None:
+    nmap = {norm(c): c for c in df.columns}
+    for a in aliases:
+        na = norm(a)
+        if na in nmap: return nmap[na]
+    for nc, orig in nmap.items():  # substring fallback
+        for a in aliases:
+            na = norm(a)
+            if na and (na in nc or nc in na): return orig
+    return None
+
+def coerce_float(x):
+    if pd.isna(x): return None
+    if isinstance(x, (int, float)): return float(x)
+    s = str(x).strip().replace(' ', '').replace(',', '')
+    try: return float(s)
+    except: return None
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    if None in (lat1, lon1, lat2, lon2): return None
+    R = 6371.0088
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = phi2 - phi1
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dl/2)**2
+    return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1-a)))
+
+# ---------- Load data ----------
+
+def load_warehouses(existing_csv: Path, candidates_csv: Path,
+                    hours_per_day: float, days: float) -> pd.DataFrame:
+    ex = pd.read_csv(existing_csv)
+    ca = pd.read_csv(candidates_csv)
+
+    def pick_cols(df: pd.DataFrame) -> pd.DataFrame:
+        wid = find_col(df, ["warehouse_id","id","code"])
+        wnm = find_col(df, ["name","warehouse name","site name","facility","location name"])
+        lat = find_col(df, ["lat","latitude"])
+        lon = find_col(df, ["lon","longitude"])
+        rate= find_col(df, ["processing_rate_per_hour","processing rate (units/hr)","processing rate","rate"])
+        fix = find_col(df, ["fixed_cost_sek","capex (sek)","capex","build cost (sek)"])
+        out = pd.DataFrame({
+            "warehouse_id": df[wid].astype(str) if wid else "",
+            "name": df[wnm].astype(str) if wnm else "",
+            "lat": df[lat].apply(coerce_float) if lat else None,
+            "lon": df[lon].apply(coerce_float) if lon else None,
+            "processing_rate_per_hour": df[rate].apply(coerce_float) if rate else 0.0,
+            "fixed_cost_sek": df[fix].apply(lambda v: int(coerce_float(v) or 0)) if fix else 0,
+        })
+        for c in ("lat","lon","processing_rate_per_hour","fixed_cost_sek"):
+            if c in out.columns:
+                out[c] = out[c].fillna(0)
+        return out
+
+    ex_std = pick_cols(ex); ex_std["is_existing"] = 1; ex_std["fixed_cost_sek"] = 0
+    ca_std = pick_cols(ca); ca_std["is_existing"] = 0
+
+    wh = pd.concat([ex_std, ca_std], ignore_index=True)
+    wh["capacity"] = wh["processing_rate_per_hour"].fillna(0.0) * float(hours_per_day) * float(days)
+    return wh
+
+def load_lockers_and_demand(lockers_csv: Path, orders_csv: Path) -> Tuple[pd.DataFrame, Dict[str, float]]:
+    lk = pd.read_csv(lockers_csv)
+    lid = find_col(lk, ["locker_id","id"])
+    lat = find_col(lk, ["lat","latitude"])
+    lon = find_col(lk, ["lon","longitude"])
+    if not (lid and lat and lon):
+        raise SystemExit("Lockers file must have locker_id + lat + lon.")
+    lk_std = pd.DataFrame({
+        "locker_id": lk[lid].astype(str),
+        "lat": lk[lat].apply(coerce_float),
+        "lon": lk[lon].apply(coerce_float),
+    })
+    od = pd.read_csv(orders_csv)
+    dest= find_col(od, ["dest_id","locker_id","lockerid"])
+    if not dest:
+        raise SystemExit("Orders file must have dest_id/locker_id.")
+    demand = od[dest].astype(str).value_counts().to_dict()
+    for k in lk_std["locker_id"]:
+        demand.setdefault(k, 0.0)
+    return lk_std, demand
+
+# ---------- Build & solve ----------
+
+def build_and_solve(wh, lk, demand,
+                    veh_cost_per_km, max_new, max_km, solver_time_limit, write_flows,
+                    out_dir, uncapacitated):
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    mode_suffix = "_UFLP" if uncapacitated else "_CFLP"
+    fn_open   = out_dir / f"open_decisions{mode_suffix}.csv"
+    fn_assign = out_dir / f"assignments_summary{mode_suffix}.csv"
+    fn_flows  = out_dir / f"flows{mode_suffix}.csv"
+
+    warehouses = wh["warehouse_id"].astype(str).tolist()
+    lockers = lk["locker_id"].astype(str).tolist()
+
+    wh_pos = {row["warehouse_id"]: (float(row["lat"]), float(row["lon"])) for _, row in wh.iterrows()}
+    lk_pos = {row["locker_id"]: (float(row["lat"]), float(row["lon"])) for _, row in lk.iterrows()}
+    wh_name= dict(zip(wh["warehouse_id"].astype(str), wh["name"].astype(str)))
+    wh_fix = dict(zip(wh["warehouse_id"].astype(str), wh["fixed_cost_sek"].astype(float)))
+    wh_cap = dict(zip(wh["warehouse_id"].astype(str), wh["capacity"].astype(float)))
+    wh_exist = dict(zip(wh["warehouse_id"].astype(str), wh["is_existing"].astype(int)))
+
+    # Build feasible (i,j) edges and costs
+    pair_list: List[Tuple[str,str]] = []
+    dist_km: Dict[Tuple[str,str], float] = {}
+    cost_ij: Dict[Tuple[str,str], float] = {}
+
+    for i in lockers:
+        lat_i, lon_i = lk_pos[i]
+        for j in warehouses:
+            lat_j, lon_j = wh_pos[j]
+            dkm = haversine_km(lat_j, lon_j, lat_i, lon_i)
+            if dkm is None:
+                continue
+            if (max_km is not None) and (dkm > max_km):
+                continue
+            pair = (i, j)
+            pair_list.append(pair)
+            dist_km[pair] = dkm
+            cost_ij[pair] = veh_cost_per_km * dkm
+
+    # Model
+    prob = pulp.LpProblem("FacilityLocation", pulp.LpMinimize)
+
+    # Variables
+    y = {j: pulp.LpVariable(f"y_{j}", lowBound=1, upBound=1, cat="Binary") if wh_exist[j] == 1
+         else pulp.LpVariable(f"y_{j}", lowBound=0, upBound=1, cat="Binary")
+         for j in warehouses}
+
+    x = {(i,j): pulp.LpVariable(f"x_{i}_{j}", lowBound=0, cat="Continuous")
+         for (i,j) in pair_list}
+
+    # Objective
+    prob += pulp.lpSum(wh_fix[j] * y[j] for j in warehouses) + \
+            pulp.lpSum(cost_ij[(i,j)] * x[(i,j)] for (i,j) in pair_list)
+
+    # Demand coverage
+    for i in lockers:
+        pairs_i = [(ii,j) for (ii,j) in pair_list if ii == i]
+        prob += pulp.lpSum(x[(i,j)] for (i,j) in pairs_i) == float(demand.get(i, 0.0)), f"demand_{i}"
+
+    # Linking constraints (always)
+    for (i,j) in pair_list:
+        Mi = float(demand.get(i, 0.0))
+        prob += x[(i,j)] <= Mi * y[j], f"link_{i}_{j}"
+
+    # Capacity constraints (skip in UFLP)
+    if not uncapacitated:
+        for j in warehouses:
+            pairs_j = [(i,jj) for (i,jj) in pair_list if jj == j]
+            prob += pulp.lpSum(x[(i,j)] for (i,j) in pairs_j) <= wh_cap[j] * y[j], f"cap_{j}"
+
+    # Optional: cap number of new sites
+    if max_new is not None:
+        prob += pulp.lpSum(y[j] for j in warehouses if wh_exist[j] == 0) <= int(max_new), "max_new_sites"
+
+    # Solve
+    solver = pulp.PULP_CBC_CMD(msg=True, timeLimit=solver_time_limit) if solver_time_limit else pulp.PULP_CBC_CMD(msg=True)
+    prob.solve(solver)
+
+    status = pulp.LpStatus[prob.status]
+    obj = pulp.value(prob.objective)
+    print(f"Status: {status}")
+    print(f"Objective (SEK): {obj:,.2f}")
+
+    # Decisions
+    open_rows = []
+    for j in warehouses:
+        v = y[j].value()
+        open_flag = int(round(v)) if v is not None else 0
+        open_rows.append({
+            "warehouse_id": j,
+            "name": wh_name[j],
+            "is_existing": wh_exist[j],
+            "open": open_flag,
+            "fixed_cost_sek": int(wh_fix[j]),
+            "capacity": float(wh_cap[j]),
+            "lat": wh_pos[j][0],
+            "lon": wh_pos[j][1],
+        })
+    open_df = pd.DataFrame(open_rows)
+    open_df.to_csv(fn_open, index=False)
+
+    # Locker assignments: pick max flow per locker
+    flows = pd.DataFrame([
+        {"locker_id": i, "warehouse_id": j, "flow": float(x[(i,j)].value() or 0.0), "km": dist_km[(i,j)]}
+        for (i,j) in pair_list
+    ])
+    flows_by_locker = flows.groupby("locker_id")["flow"].sum().reset_index().rename(columns={"flow":"demand"})
+    idx = flows.groupby("locker_id")["flow"].idxmax()
+    best = flows.loc[idx, ["locker_id","warehouse_id","km"]].rename(columns={"warehouse_id":"assigned_warehouse_id",
+                                                                             "km":"km_to_assigned"})
+    assign = best.merge(flows_by_locker, on="locker_id", how="left")
+    assign["assigned_warehouse_name"] = assign["assigned_warehouse_id"].map(wh_name)
+    assign = assign[["locker_id","assigned_warehouse_id","assigned_warehouse_name","demand","km_to_assigned"]]
+    assign.to_csv(fn_assign, index=False)
+
+    if write_flows:
+        flows.to_csv(fn_flows, index=False)
+
+    open_new = open_df[(open_df["is_existing"]==0) & (open_df["open"]==1)]
+    print(f"Opened {len(open_new)} new site(s): {', '.join(open_new['warehouse_id'].tolist()) if len(open_new) else '(none)'}")
+    print(f"Wrote: {fn_open.name}, {fn_assign.name}" + (f", {fn_flows.name}" if write_flows else ""))
+    return status, obj
+
+# ---------- CLI ----------
+
+def main():
+    ap = argparse.ArgumentParser(description="Optimize which candidate warehouses to open (facility location).")
+    ap.add_argument("--wh-existing", required=True)
+    ap.add_argument("--wh-candidates", required=True)
+    ap.add_argument("--lockers", required=True)
+    ap.add_argument("--orders", required=True)
+    ap.add_argument("--veh-cost-per-km", type=float, default=10.0)
+    ap.add_argument("--hours-per-day", type=float, default=24.0)
+    ap.add_argument("--days", type=float, default=14.0)
+    ap.add_argument("--max-new", type=int, default=None)
+    ap.add_argument("--max-km", type=float, default=None)
+    ap.add_argument("--time-limit", type=int, default=None)
+    ap.add_argument("--write-flows", action="store_true")
+    ap.add_argument("--uncapacitated", action="store_true", help="Ignore capacity limits (UFLP).")
+    ap.add_argument("--out-dir", default="Results")
+    ap.add_argument("--amort-years", type=float, default=None, help="If set, convert CAPEX to an amortized fixed cost over the horizon: CAPEX/amort_years * days/365.")
+    args = ap.parse_args()
+
+    out_dir = Path(args.out_dir)
+    wh = load_warehouses(Path(args.wh_existing), Path(args.wh_candidates),
+                         hours_per_day=args.hours_per_day, days=args.days)
+    if args.amort_years and args.amort_years > 0:
+        factor = (args.days / 365.0) / args.amort_years
+        wh["fixed_cost_sek"] = (wh["fixed_cost_sek"].astype(float) * factor).round(2)
+
+    lk, demand = load_lockers_and_demand(Path(args.lockers), Path(args.orders))
+
+    build_and_solve(wh, lk, demand,
+                    veh_cost_per_km=args.veh_cost_per_km,
+                    max_new=args.max_new,
+                    max_km=args.max_km,
+                    solver_time_limit=args.time_limit,
+                    write_flows=args.write_flows,
+                    out_dir=out_dir,
+                    uncapacitated=args.uncapacitated)
+
+if __name__ == "__main__":
+    main()
