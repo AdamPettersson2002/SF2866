@@ -1,0 +1,13 @@
+warehouse_id,name,open,vehicle_hours_used,vehicle_time_budget_h,utilization,vehicles_per_warehouse,shift_hours
+EW_1,Stockholm Hub,1,176.35397400077613,840.0,0.20994520714378112,10.0,12.0
+EW_2,Eskilstuna FC,1,46.56241038681169,840.0,0.055431440936680586,10.0,12.0
+NW_1,Barkarby Hub,1,98.29312551648894,840.0,0.1170156256148678,10.0,12.0
+NW_2,Tumba Depot,0,0.0,0.0,0.0,10.0,12.0
+NW_3,Sollentuna FC,1,115.0882242351224,840.0,0.1370097907560981,10.0,12.0
+NW_4,Haninge Hub,0,0.0,0.0,0.0,10.0,12.0
+NW_5,Upplands Väsby,0,0.0,0.0,0.0,10.0,12.0
+NW_6,Tyresö Depot,0,0.0,0.0,0.0,10.0,12.0
+NW_7,Vallentuna FC,0,0.0,0.0,0.0,10.0,12.0
+NW_8,Nynäshamn Hub,0,0.0,0.0,0.0,10.0,12.0
+NW_9,Ekerö Depot,0,0.0,0.0,0.0,10.0,12.0
+NW_10,Värmdö FC,0,0.0,0.0,0.0,10.0,12.0

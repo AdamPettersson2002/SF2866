@@ -11,6 +11,27 @@ Features
 - Candidate warehouses: labeled triangles (limit to N with --limit-candidates)
 - Lockers: not labeled; colored by occupancy_rate (fallback: capacity if occupancy missing)
 - Auto-bounds with padding; optional colorbar
+
+python render_real_map.py `
+  --wh-existing Data/warehouses_existing_real.csv `
+  --wh-candidates Data/warehouse_candidates_real.csv `
+  --lockers Data/lockers_real.csv `
+  --out Maps/stockholm_map_full.png
+
+python render_real_map.py `
+  --wh-existing Data/warehouses_existing_real.csv `
+  --wh-candidates Data/warehouse_candidates_real.csv `
+  --bounds-on lockers+candidates `
+  --lockers Data/lockers_real.csv `
+  --out Maps/stockholm_lockers_candidates.png
+
+python render_real_map.py `
+  --wh-existing Data/warehouses_existing_real.csv `
+  --wh-candidates Data/warehouse_candidates_real.csv `
+  --bounds-on lockers `
+  --lockers Data/lockers_real.csv `
+  --show-colorbar `
+  --out Maps/stockholm_lockers.png
 """
 
 from __future__ import annotations
@@ -158,7 +179,8 @@ def main():
     if len(gdf_lk_3857):
         xs = gdf_lk_3857.geometry.x.values
         ys = gdf_lk_3857.geometry.y.values
-        sc = ax.scatter(xs, ys, s=18, marker="s", c=gdf_lk_3857["val"].values, cmap=args.cmap, alpha=0.95, zorder=3)
+        sc = ax.scatter(xs, ys, s=10, marker="o", c=gdf_lk_3857["val"].values,
+                        cmap=args.cmap, alpha=0.95, zorder=3)
         if args.show_colorbar and val_label:
             cb = fig.colorbar(sc, ax=ax, shrink=0.8)
             cb.set_label(val_label)

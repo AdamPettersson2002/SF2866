@@ -2,12 +2,11 @@
 """
 analyze_solution.py — Summarize & visualize facility-location results (CFLP or UFLP).
 
-You choose exactly which files to analyze (no guessing by mtime).
-
 Inputs (give explicit files; defaults point to CFLP):
   --open     Results/open_decisions_CFLP.csv
   --assign   Results/assignments_summary_CFLP.csv
   --lockers  Data/lockers_real.csv
+  --flows    (optional) Results/flows_CFLP.csv  -> enables vehicle-time analytics
   --outdir   Results
   --title    "Assignment"
   --suffix   (optional) force output suffix, e.g. "_UFLP" or "_CFLP".
@@ -21,22 +20,28 @@ Outputs in --outdir (suffix auto-applied):
   - distance_hist{SUFFIX}.png
   - demand_share_bar{SUFFIX}.png
   - assignment_map{SUFFIX}.png
-  - late_by_warehouse{SUFFIX}.csv              <-- NEW
-  - late_stats{SUFFIX}.csv                     <-- NEW
+  - late_by_warehouse{SUFFIX}.csv
+  - late_stats{SUFFIX}.csv
+  - vehicle_utilization{SUFFIX}.csv              (if --flows provided)
 
-UFLP example:
-  python analyze_solution.py ^
-    --open Results\\open_decisions_UFLP.csv ^
-    --assign Results\\assignments_summary_UFLP.csv ^
-    --lockers Data\\lockers_real.csv ^
-    --outdir Results
+Optional vehicle-time parameters (used only if --flows is present):
+  --vehicle-speed-kmh        default 15
+  --routing-efficiency       default 1.3
+  --service-min-per-order    default 0
+  --vehicles-per-warehouse   default 20
+  --shift-hours              default 12
 
-CFLP example:
-  python analyze_solution.py `
-    --open Results\\open_decisions_CFLP.csv `
-    --assign Results\\assignments_summary_CFLP.csv `
-    --lockers Data\\lockers_real.csv `
-    --outdir Results
+python analyze_solution.py `
+  --open Results/open_decisions_CFLP.csv `
+  --assign Results/assignments_summary_CFLP.csv `
+  --lockers Data/lockers_real.csv `
+  --flows Results/flows_CFLP.csv `
+  --vehicle-speed-kmh 15 `
+  --routing-efficiency 1.3 `
+  --service-min-per-order 0 `
+  --vehicles-per-warehouse 20 `
+  --shift-hours 12 `
+  --outdir Results
 """
 
 from __future__ import annotations
@@ -46,14 +51,15 @@ import re
 import numpy as np
 import pandas as pd
 
+
 def detect_suffix(*paths: str) -> str:
-    """Return '_UFLP' or '_CFLP' if any input filename contains it (case-insensitive). Else ''."""
     pat = re.compile(r"_(UFLP|CFLP)(?=\.|$)", re.IGNORECASE)
     for p in paths:
         m = pat.search(Path(p).name)
         if m:
             return f"_{m.group(1).upper()}"
     return ""
+
 
 def pick(df: pd.DataFrame, names):
     cols = {c.lower().strip(): c for c in df.columns}
@@ -64,31 +70,42 @@ def pick(df: pd.DataFrame, names):
                 return cols[c]
     return None
 
+
 def wavg(x, w):
     x = np.asarray(x, float); w = np.asarray(w, float)
     s = np.nansum(w)
     if s <= 0: return float("nan")
     return float(np.nansum(x * w) / s)
 
+
 def main():
-    ap = argparse.ArgumentParser(description="Analyze CFLP/UFLP results with lateness.")
+    ap = argparse.ArgumentParser(description="Analyze CFLP/UFLP results with lateness, service level, and optional vehicle analytics.")
     ap.add_argument("--open",   default="Results/open_decisions_CFLP.csv",
                     help="CSV with open/closed decisions (from optimize_real_sites.py).")
     ap.add_argument("--assign", default="Results/assignments_summary_CFLP.csv",
                     help="CSV with locker assignments (from optimize_real_sites.py).")
     ap.add_argument("--lockers", default="Data/lockers_real.csv",
                     help="CSV with locker coordinates (locker_id, lat, lon).")
+    ap.add_argument("--flows", default=None,
+                    help="(Optional) flows CSV from optimizer. Enables vehicle-time analytics.")
     ap.add_argument("--outdir", default="Results", help="Output folder.")
     ap.add_argument("--title",  default="Assignment", help="Plot titles.")
     ap.add_argument("--suffix", default=None,
                     help="Force output filename suffix, e.g. _UFLP or _CFLP. If omitted, inferred from filenames.")
+
+    # vehicle-time params (used only if --flows is given)
+    ap.add_argument("--vehicle-speed-kmh", type=float, default=15.0)
+    ap.add_argument("--routing-efficiency", type=float, default=1.3)
+    ap.add_argument("--service-min-per-order", type=float, default=0.0)
+    ap.add_argument("--vehicles-per-warehouse", type=int, default=20)
+    ap.add_argument("--shift-hours", type=float, default=12.0)
     args = ap.parse_args()
 
-    # Decide suffix (NO mtime heuristics; only explicit or filename-based)
+    # Decide suffix
     if args.suffix is not None:
         suffix = args.suffix if args.suffix.startswith("_") else "_" + args.suffix
     else:
-        suffix = detect_suffix(args.open, args.assign)  # may be ""
+        suffix = detect_suffix(args.open, args.assign)
 
     outdir = Path(args.outdir); outdir.mkdir(parents=True, exist_ok=True)
 
@@ -96,6 +113,15 @@ def main():
     open_df = pd.read_csv(args.open)
     asg = pd.read_csv(args.assign)
     lockers = pd.read_csv(args.lockers)
+
+    # Optional flows (for vehicle analytics)
+    flows = None
+    if args.flows:
+        try:
+            flows = pd.read_csv(args.flows)
+        except Exception as e:
+            print(f"[veh] Could not read flows CSV '{args.flows}': {e}")
+            flows = None
 
     # Standardize/join locker coords
     lid = pick(lockers, ["locker_id","id"])
@@ -106,14 +132,22 @@ def main():
     lockers_std = lockers[[lid, lat, lon]].copy()
     lockers_std.columns = ["locker_id","lat","lon"]
 
-    # Clean assignment inputs
-    asg["demand"] = asg.get("demand", 0.0).fillna(0.0)
-    # assure km numeric
-    if "km_to_assigned" in asg.columns:
-        asg["km_to_assigned"] = pd.to_numeric(asg["km_to_assigned"], errors="coerce")
-    else:
-        asg["km_to_assigned"] = np.nan
+    # Normalize assignment inputs
+    for col in ("demand","served","unserved","km_to_assigned","assigned_p_late"):
+        if col in asg.columns:
+            asg[col] = pd.to_numeric(asg[col], errors="coerce")
+
+    # Backward compatibility: derive served/unserved if missing
     asg = asg.merge(lockers_std, on="locker_id", how="left")
+    if "served" not in asg.columns:
+        asg["served"] = asg.get("demand", 0.0).fillna(0.0)
+    else:
+        asg["served"] = asg["served"].fillna(0.0)
+    if "unserved" not in asg.columns:
+        # if not provided, assume everything was served
+        asg["unserved"] = np.maximum(asg.get("demand", 0.0).fillna(0.0) - asg["served"], 0.0)
+    else:
+        asg["unserved"] = asg["unserved"].fillna(0.0)
 
     # What opened?
     opened = open_df.query("open == 1").copy()
@@ -121,35 +155,43 @@ def main():
     n_opened_cand = len(opened_cand)
     opened_list = opened_cand["warehouse_id"].tolist()
 
-    # Demand coverage by warehouse
-    dem_by_wh = (asg.groupby(["assigned_warehouse_id","assigned_warehouse_name"], as_index=False)["demand"]
-                   .sum()
-                   .sort_values("demand", ascending=False)
+    # Demand (served) coverage by warehouse
+    # If assigned_warehouse_name is missing, map from open_df
+    if "assigned_warehouse_name" not in asg.columns:
+        name_map = dict(zip(open_df["warehouse_id"].astype(str), open_df["name"].astype(str)))
+        asg["assigned_warehouse_name"] = asg.get("assigned_warehouse_id", "").astype(str).map(name_map).fillna("N/A")
+
+    dem_by_wh = (asg.groupby(["assigned_warehouse_id","assigned_warehouse_name"], as_index=False)
+                   .agg(demand=("demand","sum") if "demand" in asg.columns else ("served","sum"),
+                        served=("served","sum"))
+                   .sort_values("served", ascending=False)
                    .reset_index(drop=True))
     dem_by_wh.to_csv(outdir / f"demand_by_warehouse{suffix}.csv", index=False)
 
-    # Distance stats by warehouse (demand-weighted)
+    # Distance stats by warehouse (served-weighted)
     def med_p95(group):
-        km = group["km_to_assigned"].values
-        wt = group["demand"].astype(int).clip(lower=1).values
+        km = pd.to_numeric(group["km_to_assigned"], errors="coerce").values
+        wt = pd.to_numeric(group["served"], errors="coerce").fillna(0).astype(int).clip(lower=0).values
+        # expand for median/p95 (ok for typical sizes)
         expanded = np.repeat(km, wt)
         return pd.Series({
-            "demand": group["demand"].sum(),
-            "avg_km": wavg(group["km_to_assigned"], group["demand"]),
-            "median_km": float(np.nanmedian(expanded)) if expanded.size else float("nan"),
-            "p95_km": float(np.nanpercentile(expanded, 95)) if expanded.size else float("nan"),
+            "served": group["served"].sum(),
+            "avg_km_served_wt": wavg(group["km_to_assigned"], group["served"]),
+            "median_km_served_wt": float(np.nanmedian(expanded)) if expanded.size else float("nan"),
+            "p95_km_served_wt": float(np.nanpercentile(expanded, 95)) if expanded.size else float("nan"),
         })
 
-    stats = (asg.groupby(["assigned_warehouse_id","assigned_warehouse_name"]).apply(med_p95)
-               .reset_index()
-               .sort_values("demand", ascending=False))
+    # select only needed columns to silence pandas FutureWarning
+    asg_for_stats = asg[["assigned_warehouse_id","assigned_warehouse_name","km_to_assigned","served"]].copy()
+    stats = (asg_for_stats.groupby(["assigned_warehouse_id","assigned_warehouse_name"], as_index=False)
+             .apply(med_p95))
+    # .apply returns a MultiIndex in newer pandas; normalize:
+    if isinstance(stats.index, pd.MultiIndex):
+        stats = stats.reset_index(drop=True)
+    stats = stats.sort_values("served", ascending=False)
     stats.to_csv(outdir / f"distance_stats{suffix}.csv", index=False)
 
-    # ------- Lateness (NEW) -------
-    # We support three cases, in priority order:
-    #  1) assignments_summary has 'expected_late_orders' (preferred).
-    #  2) else, assignments_summary has 'assigned_p_late' -> compute demand * p_late.
-    #  3) else, open_decisions has 'p_late' mapped by assigned warehouse -> compute.
+    # ------- Lateness -------
     have_expected = "expected_late_orders" in asg.columns
     have_p_late_asg = "assigned_p_late" in asg.columns
     have_p_late_open = "p_late" in open_df.columns
@@ -157,105 +199,112 @@ def main():
     if have_expected:
         asg["expected_late_orders"] = pd.to_numeric(asg["expected_late_orders"], errors="coerce").fillna(0.0)
     elif have_p_late_asg:
-        asg["assigned_p_late"] = pd.to_numeric(asg["assigned_p_late"], errors="coerce")
-        asg["expected_late_orders"] = (asg["assigned_p_late"].fillna(0.0) * asg["demand"].astype(float))
+        asg["assigned_p_late"] = pd.to_numeric(asg["assigned_p_late"], errors="coerce").fillna(0.0)
+        asg["expected_late_orders"] = asg["assigned_p_late"] * asg["served"].astype(float)
     elif have_p_late_open:
         p_map = dict(zip(open_df["warehouse_id"].astype(str), pd.to_numeric(open_df["p_late"], errors="coerce")))
-        asg["assigned_p_late"] = asg["assigned_warehouse_id"].astype(str).map(p_map)
-        asg["expected_late_orders"] = (asg["assigned_p_late"].fillna(0.0) * asg["demand"].astype(float))
+        asg["assigned_p_late"] = asg["assigned_warehouse_id"].astype(str).map(p_map).fillna(0.0)
+        asg["expected_late_orders"] = asg["assigned_p_late"] * asg["served"].astype(float)
     else:
-        asg["expected_late_orders"] = 0.0  # unknown -> treat as 0; we note it in the summary.
+        asg["expected_late_orders"] = 0.0
 
     late_by_wh = (asg.groupby(["assigned_warehouse_id","assigned_warehouse_name"], as_index=False)
-                    .agg(demand=("demand","sum"),
+                    .agg(served=("served","sum"),
                          expected_late_orders=("expected_late_orders","sum")))
-    # simple late rate (guard divide-by-zero)
-    late_by_wh["late_rate"] = np.where(
-        late_by_wh["demand"] > 0,
-        late_by_wh["expected_late_orders"] / late_by_wh["demand"],
+    late_by_wh["late_rate_on_served"] = np.where(
+        late_by_wh["served"] > 0,
+        late_by_wh["expected_late_orders"] / late_by_wh["served"],
         np.nan
     )
-    late_by_wh = late_by_wh.sort_values(["expected_late_orders","demand"], ascending=[False, False])
+    late_by_wh = late_by_wh.sort_values(["expected_late_orders","served"], ascending=[False, False])
     late_by_wh.to_csv(outdir / f"late_by_warehouse{suffix}.csv", index=False)
 
-    total_demand = float(asg["demand"].sum())
-    total_expected_late = float(asg["expected_late_orders"].sum())
-    overall_late_rate = (total_expected_late / total_demand) if total_demand > 0 else float("nan")
+    total_served = float(asg["served"].sum())
+    total_unserved = float(asg["unserved"].sum()) if "unserved" in asg.columns else 0.0
+    total_demand = total_served + total_unserved
+    service_level = (total_served / total_demand) if total_demand > 0 else float("nan")
 
-    # Human-readable summary
-    wavg_km_all = wavg(asg["km_to_assigned"], asg["demand"])
+    total_expected_late = float(asg["expected_late_orders"].sum())
+    overall_late_rate = (total_expected_late / total_served) if total_served > 0 else float("nan")
+
+    # Base summary lines
+    wavg_km_served = wavg(asg["km_to_assigned"], asg["served"])
     expanded_all = np.repeat(asg["km_to_assigned"].fillna(0).values,
-                             asg["demand"].astype(int).clip(lower=1).values)
+                             asg["served"].astype(int).clip(lower=0).values)
     p95_all = float(np.nanpercentile(expanded_all, 95)) if expanded_all.size else float("nan")
 
     lines = []
     lines.append(f"Opened new candidates: {n_opened_cand} -> {opened_list if opened_list else '(none)'}")
-    lines.append(f"Total demand served (orders): {int(total_demand)}")
-    lines.append(f"Demand-weighted avg distance (km): {wavg_km_all:.2f}")
-    lines.append(f"95th percentile distance (km): {p95_all:.2f}")
-    lines.append(f"Expected late orders (total): {int(round(total_expected_late))}")
-    lines.append(f"Expected late rate (share of demand): {overall_late_rate:.3%}")
+    lines.append(f"Total demand (orders): {int(total_demand)}")
+    lines.append(f"Served: {int(total_served)} | Unserved: {int(total_unserved)}  → Service level: {service_level:.2%}")
+    lines.append(f"Demand-weighted avg distance on served (km): {wavg_km_served:.2f}")
+    lines.append(f"95th percentile distance (served-weighted) (km): {p95_all:.2f}")
+    lines.append(f"Expected late orders (on served): {int(round(total_expected_late))}")
+    lines.append(f"Expected late rate (share of served): {overall_late_rate:.3%}")
     lines.append("")
-    lines.append("Top warehouses by demand served:")
+    lines.append("Top warehouses by served volume:")
     for _, r in dem_by_wh.head(10).iterrows():
-        lines.append(f"  - {r['assigned_warehouse_name']} ({r['assigned_warehouse_id']}): {int(r['demand'])} orders")
+        lines.append(f"  - {r['assigned_warehouse_name']} ({r['assigned_warehouse_id']}): {int(r['served'])} orders")
     lines.append("")
     lines.append("Top warehouses by expected late orders:")
     for _, r in late_by_wh.head(10).iterrows():
         lines.append(f"  - {r['assigned_warehouse_name']} ({r['assigned_warehouse_id']}): "
-                     f"{int(round(r['expected_late_orders']))} late / {int(r['demand'])} orders "
-                     f"({(r['late_rate'] if pd.notna(r['late_rate']) else 0.0):.2%})")
+                     f"{int(round(r['expected_late_orders']))} late / {int(r['served'])} served "
+                     f"({(r['late_rate_on_served'] if pd.notna(r['late_rate_on_served']) else 0.0):.2%})")
     lines.append("")
     if len(stats):
-        closest = stats.sort_values("avg_km").iloc[0]
-        farthest = stats.sort_values("avg_km").iloc[-1]
-        lines.append(f"Closest performer (by avg km): {closest['assigned_warehouse_name']} avg {closest['avg_km']:.2f} km")
-        lines.append(f"Farthest performer (by avg km): {farthest['assigned_warehouse_name']} avg {farthest['avg_km']:.2f} km")
+        closest = stats.sort_values("avg_km_served_wt").iloc[0]
+        farthest = stats.sort_values("avg_km_served_wt").iloc[-1]
+        lines.append(f"Closest performer (by avg km on served): {closest['assigned_warehouse_name']} avg {closest['avg_km_served_wt']:.2f} km")
+        lines.append(f"Farthest performer (by avg km on served): {farthest['assigned_warehouse_name']} avg {farthest['avg_km_served_wt']:.2f} km")
 
+    # Objective breakdown (if the optimizer wrote it)
     obj_path = outdir / f"objective_breakdown{suffix}.csv"
     if obj_path.exists():
         obj = pd.read_csv(obj_path).iloc[0]
         lines.append("")
         lines.append("Objective breakdown (SEK):")
-        lines.append(f"  - Fixed cost: {obj['fixed_cost_sek']:,.2f}")
-        lines.append(f"  - Transport cost: {obj['transport_cost_sek']:,.2f}")
-        lines.append(f"  - Late orders (expected): {int(round(obj['late_orders_expected']))}")
-        lines.append(
-            f"  - Late penalty (@ {obj['late_penalty_per_order']:,.0f} SEK/order): {obj['late_penalty_sek']:,.2f}")
-        lines.append(f"  => Total objective: {obj['objective_total_sek']:,.2f}")
+        if "fixed_cost_sek" in obj: lines.append(f"  - Fixed cost: {obj['fixed_cost_sek']:,.2f}")
+        if "transport_cost_sek" in obj: lines.append(f"  - Transport cost: {obj['transport_cost_sek']:,.2f}")
+        if "late_orders_expected" in obj: lines.append(f"  - Late orders (expected): {int(round(obj['late_orders_expected']))}")
+        if "late_penalty_per_order" in obj and "late_penalty_sek" in obj:
+            lines.append(f"  - Late penalty (@ {obj['late_penalty_per_order']:,.0f} SEK/order): {obj['late_penalty_sek']:,.2f}")
+        if "unserved_orders_total" in obj and "unserved_penalty_sek" in obj:
+            lines.append(f"  - Unserved orders: {int(round(obj['unserved_orders_total']))} → penalty: {obj['unserved_penalty_sek']:,.2f}")
+        if "objective_total_sek" in obj: lines.append(f"  => Total objective: {obj['objective_total_sek']:,.2f}")
 
-
-    f_summary = outdir / f"summary{suffix}.txt"
-    f_summary.write_text("\n".join(lines), encoding="utf-8")
-
-    # Save late_stats (one-line aggregate)
+    # Write summary and late stats
+    (outdir / f"summary{suffix}.txt").write_text("\n".join(lines), encoding="utf-8")
     pd.DataFrame([{
         "total_demand": int(total_demand),
+        "total_served": int(total_served),
+        "total_unserved": int(total_unserved),
+        "service_level": float(service_level),
         "total_expected_late": float(total_expected_late),
-        "overall_late_rate": float(overall_late_rate),
+        "overall_late_rate_on_served": float(overall_late_rate),
     }]).to_csv(outdir / f"late_stats{suffix}.csv", index=False)
 
     # ---------- Plots (matplotlib only, no seaborn) ----------
     import matplotlib.pyplot as plt
 
-    # 1) Histogram of distances (demand-weighted)
+    # 1) Histogram of distances (served-weighted)
     fig = plt.figure(figsize=(8,5))
     dfh = asg[asg["km_to_assigned"].notna()].copy()
     plt.hist(dfh["km_to_assigned"].values,
-             bins=30, weights=dfh["demand"].values, edgecolor="black")
+             bins=30, weights=dfh["served"].values, edgecolor="black")
     plt.xlabel("Distance to assigned warehouse (km)")
-    plt.ylabel("Orders (weighted)")
+    plt.ylabel("Orders (served-weighted)")
     plt.title(f"Distance distribution — {args.title}{suffix}")
     fig.tight_layout()
     fig.savefig(outdir / f"distance_hist{suffix}.png", dpi=200)
     plt.close(fig)
 
-    # 2) Demand share bar chart
+    # 2) Served share bar chart
     fig = plt.figure(figsize=(10,6))
-    plt.bar(dem_by_wh["assigned_warehouse_name"].astype(str), dem_by_wh["demand"].astype(float))
+    plt.bar(dem_by_wh["assigned_warehouse_name"].astype(str), dem_by_wh["served"].astype(float))
     plt.xticks(rotation=45, ha="right")
     plt.ylabel("Orders served")
-    plt.title(f"Demand served per warehouse — {args.title}{suffix}")
+    plt.title(f"Served volume per warehouse — {args.title}{suffix}")
     fig.tight_layout()
     fig.savefig(outdir / f"demand_share_bar{suffix}.png", dpi=220)
     plt.close(fig)
@@ -314,6 +363,7 @@ def main():
         print("[map] skipped:", e)
 
     print(f"Done. Wrote outputs with suffix '{suffix}' to {outdir}")
+
 
 if __name__ == "__main__":
     main()

@@ -1,17 +1,30 @@
 Opened new candidates: 2 -> ['NW_1', 'NW_3']
-Total demand served (orders): 50000
-Demand-weighted avg distance (km): 14.85
-95th percentile distance (km): 18.00
-Expected late orders (total): 1975
-Expected late rate (share of demand): 3.951%
+Total demand (orders): 50000
+Served: 50000 | Unserved: 0  → Service level: 100.00%
+Demand-weighted avg distance on served (km): 20.27
+95th percentile distance (served-weighted) (km): 27.93
+Expected late orders (on served): 1993
+Expected late rate (share of served): 3.985%
 
-Top warehouses by demand served:
-  - Barkarby Hub (NW_1): 32190 orders
-  - Sollentuna FC (NW_3): 17810 orders
+Top warehouses by served volume:
+  - Stockholm Hub (EW_1): 16177 orders
+  - Sollentuna FC (NW_3): 16166 orders
+  - Barkarby Hub (NW_1): 16015 orders
+  - Eskilstuna FC (EW_2): 1642 orders
 
 Top warehouses by expected late orders:
-  - Barkarby Hub (NW_1): 1352 late / 32190 orders (4.20%)
-  - Sollentuna FC (NW_3): 623 late / 17810 orders (3.50%)
+  - Barkarby Hub (NW_1): 673 late / 16015 served (4.20%)
+  - Stockholm Hub (EW_1): 615 late / 16177 served (3.80%)
+  - Sollentuna FC (NW_3): 566 late / 16166 served (3.50%)
+  - Eskilstuna FC (EW_2): 140 late / 1642 served (8.50%)
 
-Closest performer (by avg km): Barkarby Hub avg 14.12 km
-Farthest performer (by avg km): Sollentuna FC avg 16.17 km
+Closest performer (by avg km on served): Barkarby Hub avg 14.09 km
+Farthest performer (by avg km on served): Eskilstuna FC avg 70.32 km
+
+Objective breakdown (SEK):
+  - Fixed cost: 473,972.60
+  - Transport cost: 10,068,409.25
+  - Late orders (expected): 1988
+  - Late penalty (@ 500 SEK/order): 993,872.80
+  - Unserved orders: 0 → penalty: 0.00
+  => Total objective: 11,536,254.65

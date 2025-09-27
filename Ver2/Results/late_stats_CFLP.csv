@@ -1,2 +1,2 @@
-total_demand,total_expected_late,overall_late_rate
-50000,1975.3300000000017,0.03950660000000004
+total_demand,total_served,total_unserved,service_level,total_expected_late,overall_late_rate_on_served
+50000,50000,0,1.0,1992.7359999999999,0.039854719999999996

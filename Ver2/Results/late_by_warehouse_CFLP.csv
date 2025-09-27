@@ -1,3 +1,5 @@
-assigned_warehouse_id,assigned_warehouse_name,demand,expected_late_orders,late_rate
-NW_1,Barkarby Hub,32190.0,1351.9800000000012,0.04200000000000004
-NW_3,Sollentuna FC,17810.0,623.3500000000006,0.03500000000000003
+assigned_warehouse_id,assigned_warehouse_name,served,expected_late_orders,late_rate_on_served
+NW_1,Barkarby Hub,16015.0,672.6300000000006,0.04200000000000004
+EW_1,Stockholm Hub,16177.0,614.7259999999987,0.03799999999999992
+NW_3,Sollentuna FC,16166.0,565.8100000000005,0.03500000000000003
+EW_2,Eskilstuna FC,1642.0,139.56999999999994,0.08499999999999996

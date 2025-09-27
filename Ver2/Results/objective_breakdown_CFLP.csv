@@ -1,0 +1,2 @@
+fixed_cost_sek,transport_cost_sek,late_orders_expected,late_penalty_per_order,late_penalty_sek,unserved_orders_total,unserved_penalty_per_order,unserved_penalty_sek,objective_total_sek
+473972.6,10068409.249366134,1987.7456,500.0,993872.7999999999,0.0,4000.0,0.0,11536254.649366135
