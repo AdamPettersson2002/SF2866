@@ -21,10 +21,22 @@ Top warehouses by expected late orders:
 Closest performer (by avg km on served): Barkarby Hub avg 14.09 km
 Farthest performer (by avg km on served): Eskilstuna FC avg 70.32 km
 
+Locker congestion:
+  - Total overflow parcels (week): 0
+  - Lockers with any overflow: 0 / 180 (0.0%)
+  - See locker_overflow_top_CFLP.csv for worst offenders
+  - See clearance_summary_CFLP.csv for cleared vs. clear-capacity per locker
+  - See vehicle_utilization_summary_CFLP.csv for per-site aggregates
+
+Vehicle-time utilization:
+  - Days with >100% utilization: 0
+  - Peak site: Stockholm Hub (EW_1) → max util 0.21x
+  - See vehicle_utilization_peaks_CFLP.csv
+
 Objective breakdown (SEK):
   - Fixed cost: 473,972.60
-  - Transport cost: 10,068,409.25
+  - Transport cost: 10,070,050.96
   - Late orders (expected): 1988
   - Late penalty (@ 500 SEK/order): 993,872.80
   - Unserved orders: 0 → penalty: 0.00
-  => Total objective: 11,536,254.65
+  => Total objective: 11,537,896.36

@@ -41,7 +41,10 @@ python analyze_solution.py `
   --service-min-per-order 0 `
   --vehicles-per-warehouse 20 `
   --shift-hours 12 `
+--congestion Results/locker_congestion_CFLP.csv `
+  --vutil Results/vehicle_utilization_CFLP.csv `
   --outdir Results
+
 """
 
 from __future__ import annotations
@@ -99,6 +102,8 @@ def main():
     ap.add_argument("--service-min-per-order", type=float, default=0.0)
     ap.add_argument("--vehicles-per-warehouse", type=int, default=20)
     ap.add_argument("--shift-hours", type=float, default=12.0)
+    ap.add_argument("--congestion", default=None, help="locker_congestion CSV from optimizer")
+    ap.add_argument("--vutil", default=None, help="vehicle_utilization CSV from optimizer")
     args = ap.parse_args()
 
     # Decide suffix
@@ -113,6 +118,8 @@ def main():
     open_df = pd.read_csv(args.open)
     asg = pd.read_csv(args.assign)
     lockers = pd.read_csv(args.lockers)
+
+
 
     # Optional flows (for vehicle analytics)
     flows = None
@@ -257,6 +264,85 @@ def main():
         farthest = stats.sort_values("avg_km_served_wt").iloc[-1]
         lines.append(f"Closest performer (by avg km on served): {closest['assigned_warehouse_name']} avg {closest['avg_km_served_wt']:.2f} km")
         lines.append(f"Farthest performer (by avg km on served): {farthest['assigned_warehouse_name']} avg {farthest['avg_km_served_wt']:.2f} km")
+
+    # Optional: locker congestion
+    # Optional: locker congestion
+    if args.congestion:
+        try:
+            cong = pd.read_csv(args.congestion)
+            # coerce types
+            for c in ("overflow","S_end","clear_capacity","cleared_actual","capacity","clear_per_day"):
+                if c in cong.columns:
+                    cong[c] = pd.to_numeric(cong[c], errors="coerce").fillna(0.0)
+
+            total_overflow = float(cong["overflow"].sum())
+            lockers_any_overflow = int((cong.groupby("locker_id")["overflow"].sum() > 0).sum())
+            n_lockers = cong["locker_id"].nunique()
+
+            # Top hot spots
+            top_hot = (cong.groupby("locker_id", as_index=False)
+                       .agg(total_overflow=("overflow", "sum"),
+                            days_overflow=("overflow", lambda s: int((s > 0).sum())),
+                            avg_S_end=("S_end", "mean"),
+                            capacity=("capacity", "first"),
+                            clear_capacity=("clear_capacity", "first"),
+                            avg_cleared=("cleared_actual", "mean"))
+                       .sort_values(["total_overflow","days_overflow"], ascending=False)
+                       .head(15))
+            top_hot.to_csv(outdir / f"locker_overflow_top{suffix}.csv", index=False)
+
+            # Clearance summary
+            clr = (cong.groupby("locker_id", as_index=False)
+                   .agg(avg_cleared=("cleared_actual","mean"),
+                        avg_clear_cap=("clear_capacity","mean"),
+                        avg_S_end=("S_end","mean"),
+                        capacity=("capacity","first")))
+            clr["clear_utilization"] = np.where(clr["avg_clear_cap"] > 0,
+                                                clr["avg_cleared"] / clr["avg_clear_cap"], np.nan)
+            clr.to_csv(outdir / f"clearance_summary{suffix}.csv", index=False)
+
+            lines.append("")
+            lines.append("Locker congestion:")
+            lines.append(f"  - Total overflow parcels (week): {int(round(total_overflow))}")
+            lines.append(f"  - Lockers with any overflow: {lockers_any_overflow} / {n_lockers} "
+                         f"({(lockers_any_overflow / max(1,n_lockers)):.1%})")
+            lines.append(f"  - See locker_overflow_top{suffix}.csv for worst offenders")
+            lines.append(f"  - See clearance_summary{suffix}.csv for cleared vs. clear-capacity per locker")
+        except Exception as e:
+            print(f"[congestion] skipped: {e}")
+
+
+    # Optional: per-day vehicle utilization
+    if args.vutil:
+        try:
+            vutil = pd.read_csv(args.vutil)
+            vutil["utilization"] = pd.to_numeric(vutil["utilization"], errors="coerce")
+            over = vutil[vutil["utilization"] > 1.0].copy()
+            max_by_site = vutil.groupby(["warehouse_id", "name"], as_index=False)["utilization"].max() \
+                .sort_values("utilization", ascending=False)
+            max_by_site.to_csv(outdir / f"vehicle_utilization_peaks{suffix}.csv", index=False)
+
+            agg = (vutil.groupby(["warehouse_id","name"], as_index=False)
+                        .agg(days=("day","count"),
+                             total_hours=("vehicle_hours_used","sum"),
+                             avg_hours=("vehicle_hours_used","mean"),
+                             avg_util=("utilization","mean"),
+                             max_util=("utilization","max")))
+            agg = agg.sort_values(["max_util","avg_util"], ascending=False)
+            agg.to_csv(outdir / f"vehicle_utilization_summary{suffix}.csv", index=False)
+
+            lines.append(f"  - See vehicle_utilization_summary{suffix}.csv for per-site aggregates")
+
+            lines.append("")
+            lines.append("Vehicle-time utilization:")
+            lines.append(f"  - Days with >100% utilization: {len(over)}")
+            if len(max_by_site):
+                r = max_by_site.iloc[0]
+                lines.append(f"  - Peak site: {r['name']} ({r['warehouse_id']}) → max util {r['utilization']:.2f}x")
+                lines.append(f"  - See vehicle_utilization_peaks{suffix}.csv")
+        except Exception as e:
+            print(f"[vutil] skipped: {e}")
+
 
     # Objective breakdown (if the optimizer wrote it)
     obj_path = outdir / f"objective_breakdown{suffix}.csv"
