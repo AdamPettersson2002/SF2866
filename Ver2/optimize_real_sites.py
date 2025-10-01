@@ -24,10 +24,10 @@ Outputs (to --out-dir, default Results/):
 
 Example (CFLP):
 python optimize_real_sites.py `
-  --wh-existing Data/warehouses_existing_real.csv `
-  --wh-candidates Data/warehouse_candidates_real.csv `
-  --lockers Data/lockers_real.csv `
-  --orders Data/orders_real.csv `
+  --wh-existing "Data/warehouses_existing_real.csv" `
+  --wh-candidates "Data/warehouse_candidates_real.csv" `
+  --lockers "Data/lockers_real.csv" `
+  --orders "Data/orders_real.csv" `
   --orders-time-col order_time `
   --veh-cost-per-km 10 `
   --hours-per-day 24 `
@@ -38,7 +38,7 @@ python optimize_real_sites.py `
   --vehicles-per-warehouse 10 `
   --shift-hours 12 `
   --vehicle-speed-kmh 15 `
-  --amort-years 7 `
+  --amort-years 2 `
   --amortize-from-orders `
   --veh-capacity 200 `
   --service-min-per-order 0 `
@@ -46,11 +46,12 @@ python optimize_real_sites.py `
   --unserved-penalty 4000 `
   --overflow-penalty 5000 `
   --min-service-frac 0.9 `
-  --locker-capacity-col capacity `
-  --locker-clear-col cleared_per_day `
-  --locker-default-capacity 60 `
-  --locker-default-clear 60 `
-  --locker-default-init 0 `
+  --locker-capacity-col Capacity `
+  --clearance-mode pickup-delay `
+  --pickup-delay-csv "Data/pickup_delay_probs_per_locker.csv" `
+  --steady-warmup-days 1 `
+  --steady-baseline day1 `
+  --steady-init-if-missing `
   --write-flows `
   --out-dir Results
 """
@@ -117,6 +118,62 @@ def haversine_km(lat1, lon1, lat2, lon2):
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dl/2)**2
     return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1-a)))
 
+def load_pickup_delay_csv(path: Path) -> Dict[str, List[float]]:
+    """
+    Read a CSV with columns:
+      - locker_id
+      - either integer delay columns like 0,1,2,...  OR  'g0','g1',...
+    Returns dict: locker_id -> normalized list [g0, g1, ...].
+    """
+    df = pd.read_csv(path)
+    lid_col = find_col(df, ["locker_id","id"])
+    if not lid_col:
+        raise SystemExit("pickup-delay CSV must contain 'locker_id' column.")
+
+    delay_cols: List[Tuple[int, str]] = []
+
+    # accept 'g0','g1',... (case/space-insensitive)
+    for c in df.columns:
+        m = re.fullmatch(r"\s*g(\d+)\s*", str(c), flags=re.IGNORECASE)
+        if m:
+            delay_cols.append((int(m.group(1)), c))
+
+    # accept bare integer headers '0','1','2',...
+    for c in df.columns:
+        s = str(c).strip()
+        if s.isdigit():
+            delay_cols.append((int(s), c))
+
+    # dedupe by a (prefer exact 'gN' over bare int if both exist)
+    by_a = {}
+    for a, cname in delay_cols:
+        if a not in by_a:
+            by_a[a] = cname
+    delay_cols = sorted([(a, cname) for a, cname in by_a.items()], key=lambda x: x[0])
+
+    if not delay_cols:
+        raise SystemExit("pickup-delay CSV must contain columns like 0,1,2,... or g0,g1,g2,...")
+
+    ordered_names = [c for _, c in delay_cols]
+
+    out: Dict[str, List[float]] = {}
+    for _, row in df.iterrows():
+        lid = str(row[lid_col])
+        vals = []
+        for c in ordered_names:
+            try:
+                v = float(row[c])
+            except Exception:
+                v = 0.0
+            vals.append(max(0.0, v))
+        s = sum(vals)
+        if s > 0:
+            vals = [v / s for v in vals]
+        else:
+            # keep zeros; caller will fall back to global g_probs if present
+            pass
+        out[lid] = vals
+    return out
 # ---------- Load data ----------
 
 def load_warehouses(existing_csv: Path, candidates_csv: Path,
@@ -132,6 +189,8 @@ def load_warehouses(existing_csv: Path, candidates_csv: Path,
         rate= find_col(df, ["processing_rate_per_hour","processing rate (units/hr)","processing rate","rate"])
         fix = find_col(df, ["fixed_cost_sek","capex (sek)","capex","build cost (sek)"])
         ot  = find_col(df, ["on-time delivery rate (%)","on time delivery rate","on_time_delivery","on-time","otdr"])
+        opex = find_col(df, ["opex_sek_per_month", "opex (sek/month)", "opex", "operating_cost_monthly_sek",
+                             "monthly_opex_sek"])
 
         out = pd.DataFrame({
             "warehouse_id": df[wid].astype(str) if wid else "",
@@ -141,6 +200,7 @@ def load_warehouses(existing_csv: Path, candidates_csv: Path,
             "processing_rate_per_hour": df[rate].apply(coerce_float) if rate else 0.0,
             "fixed_cost_sek": df[fix].apply(lambda v: int(coerce_float(v) or 0)) if fix else 0,
             "on_time_rate": df[ot].apply(to_frac_percent) if ot else np.nan,
+            "opex_monthly_sek": df[opex].apply(lambda v: float(coerce_float(v) or 0.0)) if opex else 0.0,
         })
         for c in ("lat","lon","processing_rate_per_hour","fixed_cost_sek"):
             if c in out.columns:
@@ -152,8 +212,8 @@ def load_warehouses(existing_csv: Path, candidates_csv: Path,
 
     wh = pd.concat([ex_std, ca_std], ignore_index=True)
 
-    # processing capacity over the analysis horizon
-    wh["capacity"] = wh["processing_rate_per_hour"].fillna(0.0) * float(hours_per_day) * float(days)
+    # processing capacity over the analysis horizon                                %%%%%%%%%% m=3 here %%%%%%%%%%
+    wh["capacity"] = wh["processing_rate_per_hour"].fillna(0.0) * float(hours_per_day) * float(days)*3
 
     # lateness
     wh["p_late"] = (1.0 - wh["on_time_rate"]).clip(lower=0.0, upper=1.0)
@@ -204,8 +264,18 @@ def load_lockers_and_demand_timephased(
     if locker_init_col and locker_init_col in lk.columns:
         S0_series = pd.to_numeric(lk[locker_init_col], errors="coerce").fillna(locker_default_init)
     else:
-        S0_series = pd.Series(lockers.shape[0]*[locker_default_init])
+        # Otherwise, try derive from an occupancy-rate column: S0 = C * occ_rate
+        occ_col = find_col(lk, ["occupancy_rate", "occupancyrate", "occupancy", "initial_occupancy_pct"])
+        if occ_col:
+            # to_frac turns 92 or "92%" -> 0.92; leaves 0.92 as 0.92
+            occ_frac = lk[occ_col].apply(to_frac).clip(lower=0.0, upper=1.0)
+            # Use the capacity we already computed into lockers["C"]
+            S0_series = (lockers["C"].astype(float) * occ_frac.astype(float)).round(0)
+        else:
+            # Fall back to a uniform default
+            S0_series = pd.Series(lockers.shape[0] * [locker_default_init])
 
+    # Map to dict S0[locker_id] = float
     S0 = dict(zip(lockers["locker_id"], S0_series.astype(float)))
 
     # -------- Orders to daily buckets --------
@@ -296,7 +366,13 @@ def build_and_solve(
     service_min_per_order=0.0, routing_efficiency=1.3,
     unserved_penalty=0.0, min_service_frac=None,
     overflow_penalty=5000.0,
+    clearance_mode="fixed", g_probs=None,
+    g_per_locker: dict | None = None,                 # <-- NEW
+    steady_warmup_days: int = 0,                      # <-- NEW
+    steady_baseline: str = "day1",                    # <-- NEW
+    steady_init_if_missing: bool = False,             # <-- NEW
 ):
+    g_per_locker = g_per_locker or {}
     out_dir.mkdir(parents=True, exist_ok=True)
 
     mode_suffix = "_UFLP" if uncapacitated else "_CFLP"
@@ -312,6 +388,7 @@ def build_and_solve(
     wh_pos   = {row["warehouse_id"]: (float(row["lat"]), float(row["lon"])) for _, row in wh.iterrows()}
     lk_pos   = {row["locker_id"]:   (float(row["lat"]), float(row["lon"])) for _, row in lk.iterrows()}
     wh_name  = dict(zip(wh["warehouse_id"].astype(str), wh["name"].astype(str)))
+    wh_opex = dict(zip(wh["warehouse_id"].astype(str), wh["opex_horizon_sek"].astype(float)))
     wh_fix   = dict(zip(wh["warehouse_id"].astype(str), wh["fixed_cost_sek"].astype(float)))
     wh_cap   = dict(zip(wh["warehouse_id"].astype(str), wh["capacity"].astype(float)))
     wh_exist = dict(zip(wh["warehouse_id"].astype(str), wh["is_existing"].astype(int)))
@@ -393,14 +470,89 @@ def build_and_solve(
     cl = {(i, t): pulp.LpVariable(f"cl_{i}_t{t}", lowBound=0, cat="Continuous")
           for i in lockers for t in days}
 
+    # Use pickup-delay cap if requested AND we have either per-locker or global probs
+    use_pickup_delay = (clearance_mode == "pickup-delay") and (
+        (g_per_locker is not None and len(g_per_locker) > 0) or (g_probs is not None and len(g_probs) > 0)
+    )
+
+    if use_pickup_delay:
+        # Precompute per-day sums of arrivals A_i^(t) = sum_j x[i,j,t]
+        A_expr = {(i, t): pulp.lpSum(x[(i, j, t)] for j in warehouses if (i, j) in pair_list)
+                  for i in lockers for t in days}
+
+        # --- Steady-state day-1 smoothing (no true pre-history) ---
+        # Baseline per-day arrivals Abar_i
+        locker_ids = lk["locker_id"].astype(str).tolist()
+
+        Abar = {}
+        for i in locker_ids:
+            if steady_baseline == "mean" and len(days) > 0:
+                Abar[i] = sum(float(demand_day.get((i, t), 0.0)) for t in days) / float(len(days))
+            else:
+                # day1 fallback (or if only one day)
+                Abar[i] = float(demand_day.get((i, days[0]), 0.0))
+
+        # Expected dwell E[D_i] from per-locker g (fallback to global g_probs if missing)
+        ED = {}
+        for i in locker_ids:
+            gi = g_per_locker.get(i, None)
+            if not gi:
+                gi = g_probs or []  # may be empty
+            ED[i] = sum(a * ga for a, ga in enumerate(gi)) if gi else 0.0
+
+        # Optionally set S0 if user asked and S0 not provided via column
+        if steady_init_if_missing:
+            for i in locker_ids:
+                # if current S0 is zero/absent, set to min(C_i, Abar_i * E[D_i])
+                if float(S0.get(i, 0.0)) <= 0.0 and Abar[i] > 0.0 and ED[i] > 0.0:
+                    Ci = float(C.get(i, 0.0))
+                    S0[i] = min(Ci, Abar[i] * ED[i])
+
+        # Synthetic pre-horizon arrivals for convolution only
+        # Use W = steady_warmup_days (default 3). If 0, we still allow A^(0)=Abar to enable g_{i,1} on day1.
+        W = max(0, int(steady_warmup_days))
+        A_pre = {}  # keys (i, tau) for tau in {0, -1, ..., -(W-1)}
+        for i in locker_ids:
+            base = Abar[i]
+            for k in range(W):
+                tau = 0 - k  # 0, -1, -2, ...
+                A_pre[(i, tau)] = base
+
+        # Expected pickups (linear in x):
+        # w_hat[i,t] = sum_a g_{i,a} * A_i^(t-a), with A_i^(tau<1)=0
+
+        w_hat = {}
+        first_t = min(days)  # 1
+
+        for i in lockers:
+            gi = g_per_locker.get(i, None)
+            if not gi:
+                gi = g_probs or []
+            for t in days:
+                terms = []
+                for a, ga in enumerate(gi):
+                    if ga <= 0.0:
+                        continue
+                    tau = t - a
+                    if tau >= first_t:
+                        terms.append(ga * A_expr[(i, tau)])
+                    else:
+                        # pre-horizon synthetic arrivals
+                        if (i, tau) in A_pre:
+                            terms.append(ga * float(A_pre[(i, tau)]))
+                w_hat[(i, t)] = pulp.lpSum(terms) if terms else 0.0
+
+
     # ---------- Objective (build once, then assign) ----------
     obj_expr = (
-        # fixed
+        # fixed CAPEX (possibly amortized)
             pulp.lpSum(wh_fix[j] * y[j] for j in warehouses)
-            # transport + lateness (over all days)
+            # add OPEX over the study horizon
+            + pulp.lpSum(wh_opex[j] * y[j] for j in warehouses)
+            # transport + lateness
             + pulp.lpSum((cost_ij[(i, j)] + late_cost_ij[(i, j)]) * x[(i, j, t)]
                          for (i, j) in pair_list for t in days)
-            # unserved & overflow penalties
+            # unserved + overflow
             + float(unserved_penalty) * pulp.lpSum(u[(i, t)] for i in lockers for t in days)
             + float(overflow_penalty) * pulp.lpSum(o[(i, t)] for i in lockers for t in days)
     )
@@ -422,30 +574,55 @@ def build_and_solve(
         Ci = float(C.get(i, 0.0))
         clear_cap = float(clear_per_day.get(i, 0.0))
 
-        # t = 1
+        # --- t = 1 ---
         t = days[0]
         arrivals_1 = pulp.lpSum(x[(i, j, t)] for j in warehouses if (i, j) in pair_list)
+
         # inventory balance
         prob += S[(i, t)] == float(S0.get(i, 0.0)) + arrivals_1 - cl[(i, t)] - o[(i, t)], f"inv_{i}_t{t}"
-        # capacity and nonnegativity
+
+        # capacity
         prob += S[(i, t)] <= Ci, f"cap_{i}_t{t}"
-        # clearance limits
-        prob += cl[(i, t)] <= clear_cap, f"clear_cap_{i}_t{t}"
-        # can't clear more than available
+
+        # clearance cap: pickup-delay or fixed per-day
+        if use_pickup_delay:
+            # cannot exceed expected pickups from past arrivals
+            prob += cl[(i, t)] <= w_hat[(i, t)], f"clear_exp_{i}_t{t}"
+            # OPTIONAL ops cap as well (uncomment to enforce both):
+            # prob += cl[(i, t)] <= clear_cap, f"clear_ops_cap_{i}_t{t}"
+        else:
+            prob += cl[(i, t)] <= clear_cap, f"clear_cap_{i}_t{t}"
+
+        # cannot clear more than physically available today
         prob += cl[(i, t)] <= float(S0.get(i, 0.0)) + arrivals_1, f"clear_avail_{i}_t{t}"
-        # enforce overflow only when (prev + arrivals - clear) exceeds capacity
+
+        # overflow binding
         prob += o[(i, t)] >= float(S0.get(i, 0.0)) + arrivals_1 - cl[(i, t)] - Ci, f"overflow_bind_{i}_t{t}"
 
-        # t >= 2
+        # --- t >= 2 ---
         for idx in range(1, len(days)):
             t_prev = days[idx - 1]
             t_cur = days[idx]
             arrivals_cur = pulp.lpSum(x[(i, j, t_cur)] for j in warehouses if (i, j) in pair_list)
 
+            # inventory balance
             prob += S[(i, t_cur)] == S[(i, t_prev)] + arrivals_cur - cl[(i, t_cur)] - o[(i, t_cur)], f"inv_{i}_t{t_cur}"
+
+            # capacity
             prob += S[(i, t_cur)] <= Ci, f"cap_{i}_t{t_cur}"
-            prob += cl[(i, t_cur)] <= clear_cap, f"clear_cap_{i}_t{t_cur}"
+
+            # clearance cap: pickup-delay or fixed per-day
+            if use_pickup_delay:
+                prob += cl[(i, t_cur)] <= w_hat[(i, t_cur)], f"clear_exp_{i}_t{t_cur}"
+                # OPTIONAL ops cap (uncomment if desired)
+                # prob += cl[(i, t_cur)] <= clear_cap, f"clear_ops_cap_{i}_t{t_cur}"
+            else:
+                prob += cl[(i, t_cur)] <= clear_cap, f"clear_cap_{i}_t{t_cur}"
+
+            # cannot clear more than on-hand today
             prob += cl[(i, t_cur)] <= S[(i, t_prev)] + arrivals_cur, f"clear_avail_{i}_t{t_cur}"
+
+            # overflow binding
             prob += o[(i, t_cur)] >= S[(i, t_prev)] + arrivals_cur - cl[(i, t_cur)] - Ci, f"overflow_bind_{i}_t{t_cur}"
 
     # Linking
@@ -517,6 +694,7 @@ def build_and_solve(
             "is_existing": wh_exist[j],
             "open": open_flag,
             "fixed_cost_sek": int(wh_fix[j]),
+            "opex_horizon_sek": float(wh_opex[j]),
             "capacity": float(wh_cap[j]),
             "lat": wh_pos[j][0],
             "lon": wh_pos[j][1],
@@ -631,9 +809,11 @@ def build_and_solve(
 
     total_overflow = sum(float(o[(i, t)].value() or 0.0) for i in lockers for t in days)
     overflow_penalty_cost = float(overflow_penalty) * total_overflow
+    opex_cost = sum(wh_opex[j] * (int(round(y[j].value())) if y[j].value() is not None else 0) for j in warehouses)
 
     pd.DataFrame([{
         "fixed_cost_sek": fixed_cost,
+        "opex_sek": opex_cost,
         "transport_cost_sek": transport_cost,
         "late_orders_expected": late_orders_expected,
         "late_penalty_per_order": late_penalty,
@@ -644,7 +824,7 @@ def build_and_solve(
         "overflow_total": total_overflow,
         "overflow_penalty_per_parcel": overflow_penalty,
         "overflow_penalty_sek": overflow_penalty_cost,
-        "objective_total_sek": fixed_cost + transport_cost + late_penalty_cost + unserved_penalty_cost + overflow_penalty_cost,
+        "objective_total_sek": fixed_cost + opex_cost + transport_cost + late_penalty_cost + unserved_penalty_cost + overflow_penalty_cost,
     }]).to_csv(fn_obj, index=False)
 
     vutil_rows = []
@@ -756,8 +936,41 @@ def main():
 
     ap.add_argument("--overflow-penalty", type=float, default=5000.0,
                     help="SEK cost per parcel that overflows a locker on a given day (congestion penalty).")
+    ap.add_argument("--clearance-mode", choices=["fixed", "pickup-delay"], default="fixed",
+                    help="Locker clearance policy. 'fixed' uses per-locker clear_per_day; "
+                         "'pickup-delay' caps daily clearance by the expected pickups via a delay distribution.")
+    ap.add_argument("--pickup-delay-probs", default=None,
+                    help="Comma-separated probabilities g_0,g_1,... for pickup delay in whole days. "
+                         "They will be normalized and the tail implied by extra values is kept.")
+    ap.add_argument("--pickup-delay-csv", default=None,
+                    help="CSV with per-locker pickup delay probs. Columns: locker_id,0,1,2,... (or g0,g1,...)")
+    ap.add_argument("--steady-warmup-days", type=int, default=3,
+                    help="Synthetic pre-horizon length W for day-1 pickup convolution when no pre-history is available.")
+    ap.add_argument("--steady-baseline", choices=["day1", "mean"], default="day1",
+                    help="Use day1 demand or mean over the modeled horizon as baseline arrivals per locker.")
+    ap.add_argument("--steady-init-if-missing", action="store_true",
+                    help="If no locker_init_col, set S0≈min(C, Abar*E[D]) using per-locker g.")
+    args = ap.parse_args()
 
     args = ap.parse_args()
+
+    g_probs = None
+    g_per_locker = None  # <-- ensure it's always defined
+
+    if args.pickup_delay_probs:
+        try:
+            raw = [float(s) for s in str(args.pickup_delay_probs).split(",")]
+            total = sum(x for x in raw if x >= 0.0)
+            if total <= 0:
+                raise ValueError("nonpositive sum")
+            g_probs = [max(0.0, x) / total for x in raw]  # normalized
+        except Exception as e:
+            raise SystemExit(f"--pickup-delay-probs parsing error: {e}. "
+                             f"Example: --pickup-delay-probs 0.6,0.25,0.1,0.05")
+
+    # Load per-locker CSV *independently* of --pickup-delay-probs
+    if args.pickup_delay_csv:
+        g_per_locker = load_pickup_delay_csv(Path(args.pickup_delay_csv))
 
     out_dir = Path(args.out_dir)
     wh = load_warehouses(Path(args.wh_existing), Path(args.wh_candidates),
@@ -792,6 +1005,8 @@ def main():
             raise SystemExit("No parseable timestamps found in orders for --amortize-from-orders.")
         span_days = (ts.max().normalize() - ts.min().normalize()).days + 1
         amort_days = max(1, span_days)
+
+    wh["opex_horizon_sek"] = wh["opex_monthly_sek"].astype(float) * (amort_days / 31.0)
 
     if args.amort_years and args.amort_years > 0:
         factor = (amort_days / 365.0) / float(args.amort_years)
@@ -837,6 +1052,12 @@ def main():
         unserved_penalty=args.unserved_penalty,
         min_service_frac=args.min_service_frac,
         overflow_penalty=args.overflow_penalty,
+        clearance_mode=args.clearance_mode,
+        g_probs=g_probs,
+        g_per_locker=g_per_locker,
+        steady_warmup_days=args.steady_warmup_days,
+        steady_baseline=args.steady_baseline,
+        steady_init_if_missing=args.steady_init_if_missing,
     )
 
 

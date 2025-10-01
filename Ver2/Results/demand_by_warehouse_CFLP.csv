@@ -1,5 +1,3 @@
 assigned_warehouse_id,assigned_warehouse_name,demand,served
-EW_1,Stockholm Hub,16177.0,16177.0
-NW_3,Sollentuna FC,16166.0,16166.0
-NW_1,Barkarby Hub,16015.0,16015.0
-EW_2,Eskilstuna FC,1642.0,1642.0
+NW_1,Barkarby Hub,48073.0,48068.947368
+EW_1,Stockholm Hub,1927.0,1927.0

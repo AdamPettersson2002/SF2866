@@ -44,7 +44,6 @@ python analyze_solution.py `
 --congestion Results/locker_congestion_CFLP.csv `
   --vutil Results/vehicle_utilization_CFLP.csv `
   --outdir Results
-
 """
 
 from __future__ import annotations
@@ -54,7 +53,6 @@ import re
 import numpy as np
 import pandas as pd
 
-
 def detect_suffix(*paths: str) -> str:
     pat = re.compile(r"_(UFLP|CFLP)(?=\.|$)", re.IGNORECASE)
     for p in paths:
@@ -62,7 +60,6 @@ def detect_suffix(*paths: str) -> str:
         if m:
             return f"_{m.group(1).upper()}"
     return ""
-
 
 def pick(df: pd.DataFrame, names):
     cols = {c.lower().strip(): c for c in df.columns}
@@ -73,13 +70,11 @@ def pick(df: pd.DataFrame, names):
                 return cols[c]
     return None
 
-
 def wavg(x, w):
     x = np.asarray(x, float); w = np.asarray(w, float)
     s = np.nansum(w)
     if s <= 0: return float("nan")
     return float(np.nansum(x * w) / s)
-
 
 def main():
     ap = argparse.ArgumentParser(description="Analyze CFLP/UFLP results with lateness, service level, and optional vehicle analytics.")
@@ -95,7 +90,6 @@ def main():
     ap.add_argument("--title",  default="Assignment", help="Plot titles.")
     ap.add_argument("--suffix", default=None,
                     help="Force output filename suffix, e.g. _UFLP or _CFLP. If omitted, inferred from filenames.")
-
     # vehicle-time params (used only if --flows is given)
     ap.add_argument("--vehicle-speed-kmh", type=float, default=15.0)
     ap.add_argument("--routing-efficiency", type=float, default=1.3)
@@ -119,7 +113,15 @@ def main():
     asg = pd.read_csv(args.assign)
     lockers = pd.read_csv(args.lockers)
 
-
+    # --- OPEX fallback (sum from open_decisions if needed later) ---
+    fallback_opex = None
+    try:
+        if "opex_horizon_sek" in open_df.columns and "open" in open_df.columns:
+            fallback_opex = float(pd.to_numeric(
+                open_df.loc[open_df["open"] == 1, "opex_horizon_sek"], errors="coerce"
+            ).fillna(0.0).sum())
+    except Exception:
+        fallback_opex = None
 
     # Optional flows (for vehicle analytics)
     flows = None
@@ -151,7 +153,6 @@ def main():
     else:
         asg["served"] = asg["served"].fillna(0.0)
     if "unserved" not in asg.columns:
-        # if not provided, assume everything was served
         asg["unserved"] = np.maximum(asg.get("demand", 0.0).fillna(0.0) - asg["served"], 0.0)
     else:
         asg["unserved"] = asg["unserved"].fillna(0.0)
@@ -163,7 +164,6 @@ def main():
     opened_list = opened_cand["warehouse_id"].tolist()
 
     # Demand (served) coverage by warehouse
-    # If assigned_warehouse_name is missing, map from open_df
     if "assigned_warehouse_name" not in asg.columns:
         name_map = dict(zip(open_df["warehouse_id"].astype(str), open_df["name"].astype(str)))
         asg["assigned_warehouse_name"] = asg.get("assigned_warehouse_id", "").astype(str).map(name_map).fillna("N/A")
@@ -179,7 +179,6 @@ def main():
     def med_p95(group):
         km = pd.to_numeric(group["km_to_assigned"], errors="coerce").values
         wt = pd.to_numeric(group["served"], errors="coerce").fillna(0).astype(int).clip(lower=0).values
-        # expand for median/p95 (ok for typical sizes)
         expanded = np.repeat(km, wt)
         return pd.Series({
             "served": group["served"].sum(),
@@ -188,11 +187,9 @@ def main():
             "p95_km_served_wt": float(np.nanpercentile(expanded, 95)) if expanded.size else float("nan"),
         })
 
-    # select only needed columns to silence pandas FutureWarning
     asg_for_stats = asg[["assigned_warehouse_id","assigned_warehouse_name","km_to_assigned","served"]].copy()
     stats = (asg_for_stats.groupby(["assigned_warehouse_id","assigned_warehouse_name"], as_index=False)
              .apply(med_p95))
-    # .apply returns a MultiIndex in newer pandas; normalize:
     if isinstance(stats.index, pd.MultiIndex):
         stats = stats.reset_index(drop=True)
     stats = stats.sort_values("served", ascending=False)
@@ -234,7 +231,7 @@ def main():
     total_expected_late = float(asg["expected_late_orders"].sum())
     overall_late_rate = (total_expected_late / total_served) if total_served > 0 else float("nan")
 
-    # Base summary lines
+    # Summary
     wavg_km_served = wavg(asg["km_to_assigned"], asg["served"])
     expanded_all = np.repeat(asg["km_to_assigned"].fillna(0).values,
                              asg["served"].astype(int).clip(lower=0).values)
@@ -265,54 +262,122 @@ def main():
         lines.append(f"Closest performer (by avg km on served): {closest['assigned_warehouse_name']} avg {closest['avg_km_served_wt']:.2f} km")
         lines.append(f"Farthest performer (by avg km on served): {farthest['assigned_warehouse_name']} avg {farthest['avg_km_served_wt']:.2f} km")
 
-    # Optional: locker congestion
-    # Optional: locker congestion
+    # Locker congestion (optional)
     if args.congestion:
         try:
             cong = pd.read_csv(args.congestion)
-            # coerce types
-            for c in ("overflow","S_end","clear_capacity","cleared_actual","capacity","clear_per_day"):
+
+            # Coerce numerics safely
+            num_cols = ["overflow", "S_end", "cleared_actual", "capacity", "clear_capacity", "clear_per_day",
+                        "expected_cleared", "expected_pickups", "w_hat"]
+            for c in num_cols:
                 if c in cong.columns:
                     cong[c] = pd.to_numeric(cong[c], errors="coerce").fillna(0.0)
 
-            total_overflow = float(cong["overflow"].sum())
-            lockers_any_overflow = int((cong.groupby("locker_id")["overflow"].sum() > 0).sum())
+            # Detect clearance mode
+            # Pickup-delay mode will write an expectation column under one of these names:
+            expected_col = None
+            for cand in ["expected_cleared", "expected_pickups", "w_hat"]:
+                if cand in cong.columns:
+                    expected_col = cand
+                    break
+
+            has_fixed_cap = "clear_capacity" in cong.columns or "clear_per_day" in cong.columns
+            if "clear_capacity" not in cong.columns and "clear_per_day" in cong.columns:
+                cong["clear_capacity"] = cong["clear_per_day"]  # normalize name
+
+            mode = "pickup-delay" if expected_col else ("fixed-cap" if has_fixed_cap else "unknown")
+
+            # ----- Core totals -----
+            total_overflow = float(cong["overflow"].sum()) if "overflow" in cong.columns else 0.0
+            lockers_any_overflow = int((cong.groupby("locker_id")["overflow"].sum() > 0).sum()) \
+                if "overflow" in cong.columns else 0
             n_lockers = cong["locker_id"].nunique()
 
-            # Top hot spots
+            # ----- Per-locker hot spots (top offenders) -----
+            agg_cols = {
+                "total_overflow": ("overflow", "sum"),
+                "days_overflow": ("overflow", lambda s: int((s > 0).sum())),
+                "avg_S_end": ("S_end", "mean"),
+                "capacity": ("capacity", "first"),
+                "avg_cleared": ("cleared_actual", "mean"),
+            }
+            if has_fixed_cap:
+                agg_cols["clear_capacity"] = ("clear_capacity", "first")
+            if expected_col:
+                agg_cols["avg_expected"] = (expected_col, "mean")
+
             top_hot = (cong.groupby("locker_id", as_index=False)
-                       .agg(total_overflow=("overflow", "sum"),
-                            days_overflow=("overflow", lambda s: int((s > 0).sum())),
-                            avg_S_end=("S_end", "mean"),
-                            capacity=("capacity", "first"),
-                            clear_capacity=("clear_capacity", "first"),
-                            avg_cleared=("cleared_actual", "mean"))
-                       .sort_values(["total_overflow","days_overflow"], ascending=False)
+                       .agg(**agg_cols)
+                       .sort_values(["total_overflow", "days_overflow"], ascending=False)
                        .head(15))
+            # Derived ratios
+            if has_fixed_cap and "clear_capacity" in top_hot.columns:
+                top_hot["clear_utilization"] = np.where(top_hot["clear_capacity"] > 0,
+                                                        top_hot["avg_cleared"] / top_hot["clear_capacity"], np.nan)
+            if expected_col and "avg_expected" in top_hot.columns:
+                top_hot["pickup_realization"] = np.where(top_hot["avg_expected"] > 0,
+                                                         top_hot["avg_cleared"] / top_hot["avg_expected"], np.nan)
+
             top_hot.to_csv(outdir / f"locker_overflow_top{suffix}.csv", index=False)
 
-            # Clearance summary
-            clr = (cong.groupby("locker_id", as_index=False)
-                   .agg(avg_cleared=("cleared_actual","mean"),
-                        avg_clear_cap=("clear_capacity","mean"),
-                        avg_S_end=("S_end","mean"),
-                        capacity=("capacity","first")))
-            clr["clear_utilization"] = np.where(clr["avg_clear_cap"] > 0,
-                                                clr["avg_cleared"] / clr["avg_clear_cap"], np.nan)
+            # ----- Clearance summary (all lockers) -----
+            clr_agg = {
+                "avg_cleared": ("cleared_actual", "mean"),
+                "avg_S_end": ("S_end", "mean"),
+                "capacity": ("capacity", "first"),
+            }
+            if has_fixed_cap:
+                clr_agg["avg_clear_cap"] = ("clear_capacity", "mean")
+            if expected_col:
+                clr_agg["avg_expected"] = (expected_col, "mean")
+
+            clr = (cong.groupby("locker_id", as_index=False).agg(**clr_agg))
+
+            if has_fixed_cap and "avg_clear_cap" in clr.columns:
+                clr["clear_utilization"] = np.where(clr["avg_clear_cap"] > 0,
+                                                    clr["avg_cleared"] / clr["avg_clear_cap"], np.nan)
+            if expected_col and "avg_expected" in clr.columns:
+                clr["pickup_realization"] = np.where(clr["avg_expected"] > 0,
+                                                     clr["avg_cleared"] / clr["avg_expected"], np.nan)
             clr.to_csv(outdir / f"clearance_summary{suffix}.csv", index=False)
 
+            # ----- (Optional) daily time-series wide export for diagnostics -----
+            # Produces locker/day with cleared vs expected and overflow; harmless if expected_col is None.
+            ts_cols = ["day", "locker_id", "cleared_actual", "overflow", "S_end", "capacity"]
+            if has_fixed_cap: ts_cols.append("clear_capacity")
+            if expected_col:  ts_cols.append(expected_col)
+            ts_export = cong.loc[:, [c for c in ts_cols if c in cong.columns]].copy()
+            ts_export.to_csv(outdir / f"locker_clearance_timeseries{suffix}.csv", index=False)
+
+            # ----- Human-readable summary -----
             lines.append("")
             lines.append("Locker congestion:")
+            lines.append(f"  - Mode detected: {mode}")
             lines.append(f"  - Total overflow parcels (week): {int(round(total_overflow))}")
             lines.append(f"  - Lockers with any overflow: {lockers_any_overflow} / {n_lockers} "
-                         f"({(lockers_any_overflow / max(1,n_lockers)):.1%})")
+                         f"({(lockers_any_overflow / max(1, n_lockers)):.1%})")
+            if expected_col:
+                # Overall realization ratio (cleared vs expected)
+                overall_expected = float(cong[expected_col].sum())
+                overall_cleared = float(cong["cleared_actual"].sum())
+                if overall_expected > 0:
+                    lines.append(
+                        f"  - Pickup realization (cleared/expected): {overall_cleared / overall_expected:.2f}x")
+            if has_fixed_cap:
+                overall_cap = float(cong["clear_capacity"].sum())
+                if overall_cap > 0:
+                    lines.append(f"  - Clearance util (sum cleared / sum cap): "
+                                 f"{float(cong['cleared_actual'].sum()) / overall_cap:.2f}x")
             lines.append(f"  - See locker_overflow_top{suffix}.csv for worst offenders")
-            lines.append(f"  - See clearance_summary{suffix}.csv for cleared vs. clear-capacity per locker")
+            lines.append(f"  - See clearance_summary{suffix}.csv for averages and ratios per locker")
+            if expected_col:
+                lines.append(f"  - See locker_clearance_timeseries{suffix}.csv for day-by-day cleared vs expected")
+
         except Exception as e:
             print(f"[congestion] skipped: {e}")
 
-
-    # Optional: per-day vehicle utilization
+    # Vehicle utilization (optional)
     if args.vutil:
         try:
             vutil = pd.read_csv(args.vutil)
@@ -343,23 +408,54 @@ def main():
         except Exception as e:
             print(f"[vutil] skipped: {e}")
 
-
     # Objective breakdown (if the optimizer wrote it)
     obj_path = outdir / f"objective_breakdown{suffix}.csv"
     if obj_path.exists():
         obj = pd.read_csv(obj_path).iloc[0]
+        # numeric coercion for safety
+        def num(x):
+            try: return float(x)
+            except: return 0.0
+
         lines.append("")
         lines.append("Objective breakdown (SEK):")
-        if "fixed_cost_sek" in obj: lines.append(f"  - Fixed cost: {obj['fixed_cost_sek']:,.2f}")
-        if "transport_cost_sek" in obj: lines.append(f"  - Transport cost: {obj['transport_cost_sek']:,.2f}")
-        if "late_orders_expected" in obj: lines.append(f"  - Late orders (expected): {int(round(obj['late_orders_expected']))}")
-        if "late_penalty_per_order" in obj and "late_penalty_sek" in obj:
-            lines.append(f"  - Late penalty (@ {obj['late_penalty_per_order']:,.0f} SEK/order): {obj['late_penalty_sek']:,.2f}")
-        if "unserved_orders_total" in obj and "unserved_penalty_sek" in obj:
-            lines.append(f"  - Unserved orders: {int(round(obj['unserved_orders_total']))} → penalty: {obj['unserved_penalty_sek']:,.2f}")
-        if "objective_total_sek" in obj: lines.append(f"  => Total objective: {obj['objective_total_sek']:,.2f}")
+        fixed_cost = num(obj.get("fixed_cost_sek", 0.0))
+        transport_cost = num(obj.get("transport_cost_sek", 0.0))
+        late_orders_expected = num(obj.get("late_orders_expected", 0.0))
+        late_penalty = num(obj.get("late_penalty_per_order", 0.0))
+        late_cost = num(obj.get("late_penalty_sek", 0.0))
+        unserved_total = num(obj.get("unserved_orders_total", 0.0))
+        unserved_cost = num(obj.get("unserved_penalty_sek", 0.0))
+        overflow_total = num(obj.get("overflow_total", 0.0))
+        overflow_cost = num(obj.get("overflow_penalty_sek", 0.0))
 
-    # Write summary and late stats
+        # OPEX (either from objective_breakdown, or fallback from open_decisions)
+        if "opex_sek" in obj:
+            opex_cost = num(obj["opex_sek"])
+            lines.append(f"  - OPEX (horizon): {opex_cost:,.2f}")
+        elif fallback_opex is not None:
+            opex_cost = float(fallback_opex)
+            lines.append(f"  - OPEX (horizon): {opex_cost:,.2f}  (from open_decisions)")
+        else:
+            opex_cost = 0.0
+
+        if "fixed_cost_sek" in obj: lines.append(f"  - Fixed cost: {fixed_cost:,.2f}")
+        if "transport_cost_sek" in obj: lines.append(f"  - Transport cost: {transport_cost:,.2f}")
+        if "late_orders_expected" in obj: lines.append(f"  - Late orders (expected): {int(round(late_orders_expected))}")
+        if "late_penalty_per_order" in obj and "late_penalty_sek" in obj:
+            lines.append(f"  - Late penalty (@ {late_penalty:,.0f} SEK/order): {late_cost:,.2f}")
+        if "unserved_orders_total" in obj and "unserved_penalty_sek" in obj:
+            lines.append(f"  - Unserved orders: {int(round(unserved_total))} → penalty: {unserved_cost:,.2f}")
+        if "overflow_total" in obj and "overflow_penalty_sek" in obj:
+            lines.append(f"  - Overflow parcels: {int(round(overflow_total))} → penalty: {overflow_cost:,.2f}")
+
+        if "objective_total_sek" in obj and pd.notna(obj["objective_total_sek"]):
+            lines.append(f"  => Total objective: {num(obj['objective_total_sek']):,.2f}")
+        else:
+            total_calc = fixed_cost + opex_cost + transport_cost + late_cost + unserved_cost + overflow_cost
+            lines.append(f"  => Total objective (reconstructed): {total_calc:,.2f}")
+
+    # Write summary + late stats
     (outdir / f"summary{suffix}.txt").write_text("\n".join(lines), encoding="utf-8")
     pd.DataFrame([{
         "total_demand": int(total_demand),
@@ -373,7 +469,7 @@ def main():
     # ---------- Plots (matplotlib only, no seaborn) ----------
     import matplotlib.pyplot as plt
 
-    # 1) Histogram of distances (served-weighted)
+    # 1) Histogram
     fig = plt.figure(figsize=(8,5))
     dfh = asg[asg["km_to_assigned"].notna()].copy()
     plt.hist(dfh["km_to_assigned"].values,
@@ -395,7 +491,7 @@ def main():
     fig.savefig(outdir / f"demand_share_bar{suffix}.png", dpi=220)
     plt.close(fig)
 
-    # 3) Static assignment map (GeoPandas + optional basemap)
+    # 3) Assignment map
     try:
         import geopandas as gpd
         from shapely.geometry import Point
@@ -404,7 +500,6 @@ def main():
         except Exception:
             cx = None
 
-        # Color lockers by assigned warehouse id (categorical)
         color_ids = {wid: idx for idx, wid in enumerate(dem_by_wh["assigned_warehouse_id"].tolist())}
         asg["color_id"] = asg["assigned_warehouse_id"].map(color_ids).fillna(-1).astype(int)
 
@@ -449,7 +544,6 @@ def main():
         print("[map] skipped:", e)
 
     print(f"Done. Wrote outputs with suffix '{suffix}' to {outdir}")
-
 
 if __name__ == "__main__":
     main()

@@ -1,2 +1,2 @@
-fixed_cost_sek,transport_cost_sek,late_orders_expected,late_penalty_per_order,late_penalty_sek,unserved_orders_total,unserved_penalty_per_order,unserved_penalty_sek,overflow_total,overflow_penalty_per_parcel,overflow_penalty_sek,objective_total_sek
-473972.6,10070050.957478544,1987.7455999999997,500.0,993872.7999999998,0.0,4000.0,0.0,0.0,5000.0,0.0,11537896.357478544
+fixed_cost_sek,opex_sek,transport_cost_sek,late_orders_expected,late_penalty_per_order,late_penalty_sek,unserved_orders_total,unserved_penalty_per_order,unserved_penalty_sek,overflow_total,overflow_penalty_per_parcel,overflow_penalty_sek,objective_total_sek
+815068.49,2100000.0,7408174.973419496,2092.978799984002,500.0,1046489.3999920009,4.0526316,4000.0,16210.526399999999,274.61971769,5000.0,1373098.5884500002,12759041.978261497

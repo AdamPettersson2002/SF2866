@@ -1,42 +1,42 @@
-Opened new candidates: 2 -> ['NW_1', 'NW_3']
-Total demand (orders): 50000
-Served: 50000 | Unserved: 0  → Service level: 100.00%
-Demand-weighted avg distance on served (km): 20.27
-95th percentile distance (served-weighted) (km): 27.93
-Expected late orders (on served): 1993
-Expected late rate (share of served): 3.985%
+Opened new candidates: 1 -> ['NW_1']
+Total demand (orders): 49999
+Served: 49995 | Unserved: 4  → Service level: 99.99%
+Demand-weighted avg distance on served (km): 14.86
+95th percentile distance (served-weighted) (km): 18.25
+Expected late orders (on served): 2092
+Expected late rate (share of served): 4.185%
 
 Top warehouses by served volume:
-  - Stockholm Hub (EW_1): 16177 orders
-  - Sollentuna FC (NW_3): 16166 orders
-  - Barkarby Hub (NW_1): 16015 orders
-  - Eskilstuna FC (EW_2): 1642 orders
+  - Barkarby Hub (NW_1): 48068 orders
+  - Stockholm Hub (EW_1): 1927 orders
 
 Top warehouses by expected late orders:
-  - Barkarby Hub (NW_1): 673 late / 16015 served (4.20%)
-  - Stockholm Hub (EW_1): 615 late / 16177 served (3.80%)
-  - Sollentuna FC (NW_3): 566 late / 16166 served (3.50%)
-  - Eskilstuna FC (EW_2): 140 late / 1642 served (8.50%)
+  - Barkarby Hub (NW_1): 2019 late / 48068 served (4.20%)
+  - Stockholm Hub (EW_1): 73 late / 1927 served (3.80%)
 
-Closest performer (by avg km on served): Barkarby Hub avg 14.09 km
-Farthest performer (by avg km on served): Eskilstuna FC avg 70.32 km
+Closest performer (by avg km on served): Barkarby Hub avg 14.54 km
+Farthest performer (by avg km on served): Stockholm Hub avg 22.97 km
 
 Locker congestion:
-  - Total overflow parcels (week): 0
-  - Lockers with any overflow: 0 / 180 (0.0%)
+  - Mode detected: fixed-cap
+  - Total overflow parcels (week): 275
+  - Lockers with any overflow: 51 / 180 (28.3%)
+  - Clearance util (sum cleared / sum cap): 0.59x
   - See locker_overflow_top_CFLP.csv for worst offenders
-  - See clearance_summary_CFLP.csv for cleared vs. clear-capacity per locker
+  - See clearance_summary_CFLP.csv for averages and ratios per locker
   - See vehicle_utilization_summary_CFLP.csv for per-site aggregates
 
 Vehicle-time utilization:
   - Days with >100% utilization: 0
-  - Peak site: Stockholm Hub (EW_1) → max util 0.21x
+  - Peak site: Barkarby Hub (NW_1) → max util 0.36x
   - See vehicle_utilization_peaks_CFLP.csv
 
 Objective breakdown (SEK):
-  - Fixed cost: 473,972.60
-  - Transport cost: 10,070,050.96
-  - Late orders (expected): 1988
-  - Late penalty (@ 500 SEK/order): 993,872.80
-  - Unserved orders: 0 → penalty: 0.00
-  => Total objective: 11,537,896.36
+  - OPEX (horizon): 2,100,000.00
+  - Fixed cost: 815,068.49
+  - Transport cost: 7,408,174.97
+  - Late orders (expected): 2093
+  - Late penalty (@ 500 SEK/order): 1,046,489.40
+  - Unserved orders: 4 → penalty: 16,210.53
+  - Overflow parcels: 275 → penalty: 1,373,098.59
+  => Total objective: 12,759,041.98
