@@ -1,19 +1,60 @@
 # Amazon Stockholm Case – Mapping, Optimization & Simulation
 
-Scripts:
-- `make_bboxes.py` – build bounding boxes (5/10/20/50/100 km) around a center
-- `make_points.py` – simulate candidate warehouses + lockers → Data/points.csv
-- `gen_synthetic_data.py` – create Data/*.csv (warehouses, candidates, lockers, orders)
-- `render_map.py` – PNG/HTML maps; crop by box; WH labels; locker coloring
-- `optimize_sites.py` – choose which candidate warehouses to open (PuLP)
-- `simulate_system.py` – SimPy DES of warehouse→locker/home with locker capacity & pickups
+Scripts that were used:
+- `optimize_real_sites.py` – Generate and solve the optimization problem for different input parameter values.
+- `analyze_solution.py` – Generates solution interpretation into the "Results/" folder.
+- `hyperparameter_testing.py` – Used for generating different solutions for different hyperparameters.
 
 ## Quick start
 ```powershell
-python make_points.py --center 59.33,18.06 --box 20 --n-wh 5 --n-lockers 170 --include-center --seed 42 --out Data\points.csv
-python gen_synthetic_data.py --points Data\points.csv --n-days 14 --orders-per-day 5000 --prime-frac 0.2
-python render_map.py --center 59.33,18.06 --mode static --box 20 --hide-grid --points-csv Data\points.csv --out stockholm_map
-pip install pulp
-python optimize_sites.py --veh-cost-per-km 10 --max-new 1
-pip install simpy numpy
-python simulate_system.py --n-days 7 --truck-speed-kmh 35 --mu 1200 --pickup-mean-hours 36
+
+python optimize_real_sites.py `
+  --wh-existing "Data/warehouses_existing_real.csv" `
+  --wh-candidates "Data/warehouse_candidates_real.csv" `
+  --lockers "Data/lockers_real.csv" `
+  --orders "Data/orders_real.csv" `
+  --orders-time-col order_time `
+  --veh-cost-per-km 20 `
+  --hours-per-day 24 `
+  --days 7 `
+  --max-new 2 `
+  --late-penalty 200 `
+  --late-default-rate 0.10 `
+  --vehicles-per-warehouse 10 `
+  --shift-hours 8 `
+  --vehicle-speed-kmh 15 `
+  --amort-years 2 `
+  --amortize-from-orders `
+  --veh-capacity 200 `
+  --service-min-per-order 0 `
+  --routing-efficiency 1.5 `
+  --unserved-penalty 2000 `
+  --overflow-penalty 100 `
+  --min-service-frac 0.9 `
+  --locker-capacity-col Capacity `
+  --clearance-mode pickup-delay `
+  --pickup-delay-csv "Data/pickup_delay_probs_per_locker.csv" `
+  --steady-warmup-days 1 `
+  --steady-baseline day1 `
+  --steady-init-if-missing `
+  --capacity-mult 500 `
+  --write-flows `
+  --out-dir Results
+
+  python analyze_solution.py `
+  --open Results/open_decisions_CFLP.csv `
+  --assign Results/assignments_summary_CFLP.csv `
+  --lockers Data/lockers_real.csv `
+  --flows Results/flows_CFLP.csv `
+  --vehicle-speed-kmh 15 `
+  --routing-efficiency 1.5 `
+  --service-min-per-order 0 `
+  --vehicles-per-warehouse 10 `
+  --shift-hours 8 `
+  --congestion Results/locker_congestion_CFLP.csv `
+  --vutil Results/vehicle_utilization_CFLP.csv `
+  --title "Optimal solution with existing warehouses" `
+  --no-title-suffix `
+  --outdir Results
+
+  
