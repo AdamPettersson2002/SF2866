@@ -1,50 +1,27 @@
 """
-optimize_real_sites.py — Facility location on real data (CFLP / UFLP) with truck-time capacity.
-
-New (vehicle-time model):
-- vehicles-per-warehouse (V): number of delivery vehicles available at each warehouse
-- shift-hours (H): hours per day each vehicle can drive
-- vehicle-speed-kmh: average route speed (km/h) used for time calculations
-- veh-capacity: orders per truck when full (used to apportion drive time per order)
-- service-min-per-order: minutes spent at a locker per order (drop/handle time)
-- routing-efficiency (rho ≥ 1): factor to inflate straight-line time to account for tour meander,
-  signals, loading bays, etc. (rho ~1.3–1.5 is a good start)
-
-Truck-time constraint (minutes) per warehouse j:
-  sum_i [ (rho * k_ij / speed_kmh) * (60 / cap_per_truck) + service_min_per_order ] * x_ij
-    <= (vehicles_per_warehouse * shift_hours * 60) * y_j
-
-- Capacitated mode (default): also enforces processing capacity
-- Uncapacitated mode (--uncapacitated): skips processing capacity but keeps truck-time budget & linking
-
-Outputs (to --out-dir, default Results/):
-  - open_decisions_CFLP.csv or open_decisions_UFLP.csv
-  - assignments_summary_CFLP.csv or assignments_summary_UFLP.csv
-  - (optional) flows_CFLP.csv or flows_UFLP.csv  with --write-flows
-
-Example (CFLP):
+Example:
 python optimize_real_sites.py `
   --wh-existing "Data/warehouses_existing_real.csv" `
   --wh-candidates "Data/warehouse_candidates_real.csv" `
   --lockers "Data/lockers_real.csv" `
   --orders "Data/orders_real.csv" `
   --orders-time-col order_time `
-  --veh-cost-per-km 10 `
+  --veh-cost-per-km 20 `
   --hours-per-day 24 `
   --days 7 `
   --max-new 2 `
-  --late-penalty 500 `
+  --late-penalty 200 `
   --late-default-rate 0.10 `
   --vehicles-per-warehouse 10 `
-  --shift-hours 12 `
+  --shift-hours 8 `
   --vehicle-speed-kmh 15 `
   --amort-years 2 `
   --amortize-from-orders `
   --veh-capacity 200 `
   --service-min-per-order 0 `
-  --routing-efficiency 1.3 `
-  --unserved-penalty 4000 `
-  --overflow-penalty 5000 `
+  --routing-efficiency 1.5 `
+  --unserved-penalty 2000 `
+  --overflow-penalty 100 `
   --min-service-frac 0.9 `
   --locker-capacity-col Capacity `
   --clearance-mode pickup-delay `
@@ -52,6 +29,7 @@ python optimize_real_sites.py `
   --steady-warmup-days 1 `
   --steady-baseline day1 `
   --steady-init-if-missing `
+  --capacity-mult 500 `
   --write-flows `
   --out-dir Results
 """
@@ -67,7 +45,6 @@ import pulp
 
 
 def to_frac(v):
-    """Turn 92 or '92%' -> 0.92; 0.92 stays 0.92; invalid -> 0."""
     if pd.isna(v): return 0.0
     s = str(v).strip().replace("%","")
     try:
@@ -78,7 +55,6 @@ def to_frac(v):
 
 
 def to_frac_percent(v):
-    """Turn 92 / '92%' -> 0.92; 0.92 stays 0.92; invalid -> NaN."""
     if pd.isna(v): return np.nan
     try:
         s = str(v).strip().replace("%","")
@@ -119,12 +95,6 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1-a)))
 
 def load_pickup_delay_csv(path: Path) -> Dict[str, List[float]]:
-    """
-    Read a CSV with columns:
-      - locker_id
-      - either integer delay columns like 0,1,2,...  OR  'g0','g1',...
-    Returns dict: locker_id -> normalized list [g0, g1, ...].
-    """
     df = pd.read_csv(path)
     lid_col = find_col(df, ["locker_id","id"])
     if not lid_col:
@@ -177,7 +147,8 @@ def load_pickup_delay_csv(path: Path) -> Dict[str, List[float]]:
 # ---------- Load data ----------
 
 def load_warehouses(existing_csv: Path, candidates_csv: Path,
-                    hours_per_day: float, days: float) -> pd.DataFrame:
+                    hours_per_day: float, days: float,
+                    capacity_mult: float = 3.0) -> pd.DataFrame:
     ex = pd.read_csv(existing_csv)
     ca = pd.read_csv(candidates_csv)
 
@@ -186,23 +157,22 @@ def load_warehouses(existing_csv: Path, candidates_csv: Path,
         wnm = find_col(df, ["name","warehouse name","site name","facility","location name"])
         lat = find_col(df, ["lat","latitude"])
         lon = find_col(df, ["lon","longitude"])
-        rate= find_col(df, ["processing_rate_per_hour","processing rate (units/hr)","processing rate","rate"])
-        fix = find_col(df, ["fixed_cost_sek","capex (sek)","capex","build cost (sek)"])
-        ot  = find_col(df, ["on-time delivery rate (%)","on time delivery rate","on_time_delivery","on-time","otdr"])
-        opex = find_col(df, ["opex_sek_per_month", "opex (sek/month)", "opex", "operating_cost_monthly_sek",
-                             "monthly_opex_sek"])
+        rate= find_col(df, ["Order Processing Time (hr)"])
+        fix = find_col(df, ["CAPEX (sek)"])
+        ot  = find_col(df, ["On-Time Delivery Rate (%)"])
+        opex = find_col(df, ["Monthly OPEX (SEK)"])
 
         out = pd.DataFrame({
             "warehouse_id": df[wid].astype(str) if wid else "",
             "name": df[wnm].astype(str) if wnm else "",
             "lat": df[lat].apply(coerce_float) if lat else None,
             "lon": df[lon].apply(coerce_float) if lon else None,
-            "processing_rate_per_hour": df[rate].apply(coerce_float) if rate else 0.0,
+            "Order Processing Time (hr)": df[rate].apply(coerce_float) if rate else 0.0,
             "fixed_cost_sek": df[fix].apply(lambda v: int(coerce_float(v) or 0)) if fix else 0,
             "on_time_rate": df[ot].apply(to_frac_percent) if ot else np.nan,
             "opex_monthly_sek": df[opex].apply(lambda v: float(coerce_float(v) or 0.0)) if opex else 0.0,
         })
-        for c in ("lat","lon","processing_rate_per_hour","fixed_cost_sek"):
+        for c in ("lat","lon","Order Processing Time (hr)","fixed_cost_sek"):
             if c in out.columns:
                 out[c] = out[c].fillna(0)
         return out
@@ -212,8 +182,17 @@ def load_warehouses(existing_csv: Path, candidates_csv: Path,
 
     wh = pd.concat([ex_std, ca_std], ignore_index=True)
 
-    # processing capacity over the analysis horizon                                %%%%%%%%%% m=3 here %%%%%%%%%%
-    wh["capacity"] = wh["processing_rate_per_hour"].fillna(0.0) * float(hours_per_day) * float(days)*3
+    # capacity = rate_per_hour * hours_per_day * days * m
+    wh["capacity"] = (
+        (1/wh["Order Processing Time (hr)"].fillna(0.0))
+            * float(hours_per_day) * float(days) * float(capacity_mult)
+    )
+
+    # cap_day = capacity / days = rate_per_hour * hours_per_day * m
+    wh["cap_day"] = (
+        (1/wh["Order Processing Time (hr)"].fillna(0.0))
+            * float(hours_per_day) * float(capacity_mult)
+    )
 
     # lateness
     wh["p_late"] = (1.0 - wh["on_time_rate"]).clip(lower=0.0, upper=1.0)
@@ -235,7 +214,6 @@ def load_lockers_and_demand_timephased(
 
     lk = pd.read_csv(lockers_csv)
 
-    # Required locker id/coords
     lid = find_col(lk, ["locker_id","id"])
     lat = find_col(lk, ["lat","latitude"])
     lon = find_col(lk, ["lon","longitude"])
@@ -264,18 +242,13 @@ def load_lockers_and_demand_timephased(
     if locker_init_col and locker_init_col in lk.columns:
         S0_series = pd.to_numeric(lk[locker_init_col], errors="coerce").fillna(locker_default_init)
     else:
-        # Otherwise, try derive from an occupancy-rate column: S0 = C * occ_rate
         occ_col = find_col(lk, ["occupancy_rate", "occupancyrate", "occupancy", "initial_occupancy_pct"])
         if occ_col:
-            # to_frac turns 92 or "92%" -> 0.92; leaves 0.92 as 0.92
             occ_frac = lk[occ_col].apply(to_frac).clip(lower=0.0, upper=1.0)
-            # Use the capacity we already computed into lockers["C"]
             S0_series = (lockers["C"].astype(float) * occ_frac.astype(float)).round(0)
         else:
-            # Fall back to a uniform default
             S0_series = pd.Series(lockers.shape[0] * [locker_default_init])
 
-    # Map to dict S0[locker_id] = float
     S0 = dict(zip(lockers["locker_id"], S0_series.astype(float)))
 
     # -------- Orders to daily buckets --------
@@ -284,19 +257,14 @@ def load_lockers_and_demand_timephased(
     if not dest:
         raise SystemExit("Orders file must have dest_id/locker_id.")
 
-    # Find timestamp col if not given
-    # --- Find timestamp column robustly ---
-    # 1) If the user provided a name, try to resolve it case/space-insensitively
     ts_col = orders_time_col
     if ts_col:
-        resolved = find_col(od, [ts_col])  # case/space-insensitive, substring-friendly
+        resolved = find_col(od, [ts_col])
         if resolved is None:
-            # Also try common aliases if their provided name isn't found
             resolved = find_col(od, [ts_col, "order_time", "timestamp", "created_at", "created",
                                      "orderdate", "order_date", "datetime", "time", "date"])
         ts_col = resolved
 
-    # 2) If still not found, auto-detect something with 'time' or 'date'
     if ts_col is None:
         ts_col = find_col(od, ["order_time", "timestamp", "created_at", "created",
                                "orderdate", "order_date", "datetime", "time", "date"])
@@ -308,17 +276,14 @@ def load_lockers_and_demand_timephased(
             f"Use --orders-time-col to specify one."
         )
 
-    # 3) Parse timestamps (supports string/ISO and epoch seconds/millis)
+    # Parse timestamps
     ts_raw = od[ts_col]
-    # Try direct parse first
     ts = pd.to_datetime(ts_raw, errors="coerce")
 
-    # If still all NaT, try epoch numeric (s or ms)
     if ts.isna().all():
         num = pd.to_numeric(ts_raw, errors="coerce")
         if num.notna().any():
             mx = float(num.max())
-            # crude heuristic: >1e12 → ms; >1e9 → s
             unit = "ms" if mx > 1e12 else ("s" if mx > 1e9 else None)
             if unit:
                 ts = pd.to_datetime(num, unit=unit, errors="coerce")
@@ -330,12 +295,10 @@ def load_lockers_and_demand_timephased(
     if ts.isna().all():
         raise SystemExit(f"Timestamp column '{ts_col}' could not be parsed.")
 
-    # Day index 1..T (anchor to first day present)
     day0 = ts.dropna().min().normalize()
-    t_idx = (ts.dt.normalize() - day0).dt.days + 1  # 1-based
+    t_idx = (ts.dt.normalize() - day0).dt.days + 1
     od["_t"] = t_idx
 
-    # Keep only days in 1..days
     od = od[(od["_t"] >= 1) & (od["_t"] <= int(days))].copy()
     od["locker_id"] = od[dest].astype(str)
 
@@ -367,10 +330,10 @@ def build_and_solve(
     unserved_penalty=0.0, min_service_frac=None,
     overflow_penalty=5000.0,
     clearance_mode="fixed", g_probs=None,
-    g_per_locker: dict | None = None,                 # <-- NEW
-    steady_warmup_days: int = 0,                      # <-- NEW
-    steady_baseline: str = "day1",                    # <-- NEW
-    steady_init_if_missing: bool = False,             # <-- NEW
+    g_per_locker: dict | None = None,
+    steady_warmup_days: int = 0,
+    steady_baseline: str = "day1",
+    steady_init_if_missing: bool = False,
 ):
     g_per_locker = g_per_locker or {}
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -416,7 +379,7 @@ def build_and_solve(
     C = dict(zip(lk["locker_id"], pd.to_numeric(lk["C"], errors="coerce").fillna(0.0)))
     clear_per_day = dict(zip(lk["locker_id"], pd.to_numeric(lk["clear_per_day"], errors="coerce").fillna(0.0)))
 
-    # Vehicle-time per day (NOT multiplied by days anymore)
+    # Vehicle-time per day
     time_budget_per_day = float(vehicles_per_warehouse) * float(shift_hours)
 
     v = max(float(vehicle_speed_kmh), 1e-6)  # km/h
@@ -424,7 +387,7 @@ def build_and_solve(
     cap = max(float(veh_capacity), 1.0)
     s_hr = float(service_min_per_order) / 60.0
 
-    # Distances & per-order hours same as before
+    # Distances & per-order hours
     pair_list = []
     dist_km, cost_ij, late_cost_ij, hrs_per_order = {}, {}, {}, {}
     warehouses = wh["warehouse_id"].astype(str).tolist()
@@ -442,7 +405,10 @@ def build_and_solve(
             pair = (i, j)
             pair_list.append(pair)
             dist_km[pair] = dkm
-            cost_ij[pair] = veh_cost_per_km * dkm
+            #cost_ij[pair] = veh_cost_per_km * dkm
+            """Averaging the cost per parcel with number of parcels each vehicle can carry"""
+            truck_km_per_order = rho * dkm / cap
+            cost_ij[pair] = veh_cost_per_km * truck_km_per_order
             late_cost_ij[pair] = late_penalty * p_late_eff[j]
             hrs_per_order[pair] = rho * (dkm / v) / cap + s_hr
 
@@ -470,18 +436,14 @@ def build_and_solve(
     cl = {(i, t): pulp.LpVariable(f"cl_{i}_t{t}", lowBound=0, cat="Continuous")
           for i in lockers for t in days}
 
-    # Use pickup-delay cap if requested AND we have either per-locker or global probs
     use_pickup_delay = (clearance_mode == "pickup-delay") and (
         (g_per_locker is not None and len(g_per_locker) > 0) or (g_probs is not None and len(g_probs) > 0)
     )
 
     if use_pickup_delay:
-        # Precompute per-day sums of arrivals A_i^(t) = sum_j x[i,j,t]
         A_expr = {(i, t): pulp.lpSum(x[(i, j, t)] for j in warehouses if (i, j) in pair_list)
                   for i in lockers for t in days}
 
-        # --- Steady-state day-1 smoothing (no true pre-history) ---
-        # Baseline per-day arrivals Abar_i
         locker_ids = lk["locker_id"].astype(str).tolist()
 
         Abar = {}
@@ -489,10 +451,8 @@ def build_and_solve(
             if steady_baseline == "mean" and len(days) > 0:
                 Abar[i] = sum(float(demand_day.get((i, t), 0.0)) for t in days) / float(len(days))
             else:
-                # day1 fallback (or if only one day)
                 Abar[i] = float(demand_day.get((i, days[0]), 0.0))
 
-        # Expected dwell E[D_i] from per-locker g (fallback to global g_probs if missing)
         ED = {}
         for i in locker_ids:
             gi = g_per_locker.get(i, None)
@@ -500,27 +460,21 @@ def build_and_solve(
                 gi = g_probs or []  # may be empty
             ED[i] = sum(a * ga for a, ga in enumerate(gi)) if gi else 0.0
 
-        # Optionally set S0 if user asked and S0 not provided via column
         if steady_init_if_missing:
             for i in locker_ids:
-                # if current S0 is zero/absent, set to min(C_i, Abar_i * E[D_i])
                 if float(S0.get(i, 0.0)) <= 0.0 and Abar[i] > 0.0 and ED[i] > 0.0:
                     Ci = float(C.get(i, 0.0))
                     S0[i] = min(Ci, Abar[i] * ED[i])
 
-        # Synthetic pre-horizon arrivals for convolution only
-        # Use W = steady_warmup_days (default 3). If 0, we still allow A^(0)=Abar to enable g_{i,1} on day1.
         W = max(0, int(steady_warmup_days))
-        A_pre = {}  # keys (i, tau) for tau in {0, -1, ..., -(W-1)}
+        A_pre = {}
         for i in locker_ids:
             base = Abar[i]
             for k in range(W):
                 tau = 0 - k  # 0, -1, -2, ...
                 A_pre[(i, tau)] = base
 
-        # Expected pickups (linear in x):
-        # w_hat[i,t] = sum_a g_{i,a} * A_i^(t-a), with A_i^(tau<1)=0
-
+        # Expected pickups
         w_hat = {}
         first_t = min(days)  # 1
 
@@ -537,13 +491,12 @@ def build_and_solve(
                     if tau >= first_t:
                         terms.append(ga * A_expr[(i, tau)])
                     else:
-                        # pre-horizon synthetic arrivals
                         if (i, tau) in A_pre:
                             terms.append(ga * float(A_pre[(i, tau)]))
                 w_hat[(i, t)] = pulp.lpSum(terms) if terms else 0.0
 
 
-    # ---------- Objective (build once, then assign) ----------
+    # ---------- Objective  ----------
     obj_expr = (
         # fixed CAPEX (possibly amortized)
             pulp.lpSum(wh_fix[j] * y[j] for j in warehouses)
@@ -556,11 +509,6 @@ def build_and_solve(
             + float(unserved_penalty) * pulp.lpSum(u[(i, t)] for i in lockers for t in days)
             + float(overflow_penalty) * pulp.lpSum(o[(i, t)] for i in lockers for t in days)
     )
-
-    # Optional: add a small inventory holding cost if you want to discourage locker buildup
-    holding_cost = 0.0  # e.g. try 0.1 for 0.1 SEK per parcel-day
-    if holding_cost and holding_cost != 0.0:
-        obj_expr += holding_cost * pulp.lpSum(S[(i, t)] for i in lockers for t in days)
 
     prob += obj_expr
 
@@ -584,12 +532,10 @@ def build_and_solve(
         # capacity
         prob += S[(i, t)] <= Ci, f"cap_{i}_t{t}"
 
-        # clearance cap: pickup-delay or fixed per-day
+        # clearance cap
         if use_pickup_delay:
             # cannot exceed expected pickups from past arrivals
             prob += cl[(i, t)] <= w_hat[(i, t)], f"clear_exp_{i}_t{t}"
-            # OPTIONAL ops cap as well (uncomment to enforce both):
-            # prob += cl[(i, t)] <= clear_cap, f"clear_ops_cap_{i}_t{t}"
         else:
             prob += cl[(i, t)] <= clear_cap, f"clear_cap_{i}_t{t}"
 
@@ -614,8 +560,6 @@ def build_and_solve(
             # clearance cap: pickup-delay or fixed per-day
             if use_pickup_delay:
                 prob += cl[(i, t_cur)] <= w_hat[(i, t_cur)], f"clear_exp_{i}_t{t_cur}"
-                # OPTIONAL ops cap (uncomment if desired)
-                # prob += cl[(i, t_cur)] <= clear_cap, f"clear_ops_cap_{i}_t{t_cur}"
             else:
                 prob += cl[(i, t_cur)] <= clear_cap, f"clear_cap_{i}_t{t_cur}"
 
@@ -631,23 +575,22 @@ def build_and_solve(
             Dij = float(demand_day.get((i,t), 0.0))
             prob += x[(i,j,t)] <= Dij * y[j], f"link_{i}_{j}_t{t}"
 
-    # Capacity (skip in UFLP)
+    # Capacity
     if not uncapacitated:
         for j in warehouses:
             cap_day = float(wh_cap[j]) / max(1.0, len(days))  # convert your horizon cap to per-day
-            # If you prefer: cap_day = rate_per_hour_j * hours_per_day  (requires rate separately)
             for t in days:
                 prob += pulp.lpSum(x[(i,j,t)] for i in lockers if (i,j) in pair_list) <= cap_day * y[j], f"proc_{j}_t{t}"
 
 
-    # NEW: Vehicle-time constraint per warehouse
+    # Vehicle-time constraint per warehouse
     for j in warehouses:
         for t in days:
             prob += pulp.lpSum(x[(i,j,t)] * hrs_per_order[(i,j)] for i in lockers if (i,j) in pair_list) \
                     <= time_budget_per_day * y[j], f"time_{j}_t{t}"
 
 
-    # Optional: cap number of new sites
+    # Cap for number of new sites
     if max_new is not None:
         prob += pulp.lpSum(y[j] for j in warehouses if wh_exist[j] == 0) <= int(max_new), "max_new_sites"
 
@@ -678,8 +621,6 @@ def build_and_solve(
         print("Model did not reach a feasible solution. "
               "Try loosening constraints (e.g., lower --min-service-frac, "
               "increase vehicles/shift-hours, raise --max-new) or isolate the culprit (see debug steps).")
-        # Optional: write LP for inspection
-        # prob.writeLP(str(out_dir / "model.lp"))
         return status, float("nan")
 
 
@@ -705,6 +646,7 @@ def build_and_solve(
             "shift_hours": float(shift_hours),
             "vehicle_time_budget_h_per_day": time_budget_per_day * open_flag,
             "vehicle_time_budget_h_week": time_budget_per_day * len(days) * open_flag,
+            "cap_day": float(wh_cap[j]) / max(1.0, len(days)),
         })
     open_df = pd.DataFrame(open_rows)
     open_df.to_csv(fn_open, index=False)
@@ -716,7 +658,6 @@ def build_and_solve(
         for t in days:
             qty = float(x[(i, j, t)].value() or 0.0)
             if qty == 0.0:
-                # still write it if you want a full matrix; otherwise skip zeros to keep file small
                 pass
             flows_rows.append({
                 "day": t,
@@ -732,7 +673,6 @@ def build_and_solve(
     flows["expected_late_cost"] = late_penalty * flows["expected_late"]
     flows["vehicle_hours_used"] = flows["hours_per_order"] * flows["flow"]
 
-    # Locker congestion & inventory
     cong_rows = []
     for i in lockers:
         for t in days:
@@ -749,19 +689,16 @@ def build_and_solve(
     fn_cong = out_dir / f"locker_congestion{mode_suffix}.csv"
     locker_cong.to_csv(fn_cong, index=False)
 
-    # Locker-level assignment summary (by best j per locker *aggregated over week*):
     flows_week = flows.groupby(["locker_id", "warehouse_id"], as_index=False)["flow"].sum()
     idx_max = flows_week.groupby("locker_id")["flow"].idxmax()
     best_week = flows_week.loc[idx_max].rename(columns={"flow": "served_week"})
 
-    # Distance lookup and merge
     dist_df = pd.DataFrame(
         [{"locker_id": i, "warehouse_id": j, "km_to_assigned": dist_km[(i, j)]}
          for (i, j) in pair_list]
     )
     best_week = best_week.merge(dist_df, on=["locker_id", "warehouse_id"], how="left")
 
-    # demand/served/unserved over the week
     dem_by_lock = flows.groupby("locker_id", as_index=False)["flow"].sum().rename(columns={"flow": "served"})
     unserved_week = pd.DataFrame([{
         "locker_id": i,
@@ -780,7 +717,6 @@ def build_and_solve(
 
     assign["assigned_warehouse_name"] = assign["warehouse_id"].map(wh_name).fillna("N/A")
 
-    # Late only on served
     assign = assign.rename(columns={"warehouse_id": "assigned_warehouse_id"})
     assign["assigned_p_late"] = assign["assigned_warehouse_id"].map(p_late_eff).fillna(0.0)
     assign["expected_late_orders"] = assign["assigned_p_late"] * assign["served"]
@@ -795,12 +731,27 @@ def build_and_solve(
     ]]
     assign.to_csv(fn_assign, index=False)
 
+    cap_tbl = pd.DataFrame({
+        "warehouse_id": wh["warehouse_id"].astype(str),
+        "name": wh["name"].astype(str),
+        "Order Processing Time (hr)": wh["Order Processing Time (hr)"].astype(float),
+        "capacity_horizon": wh["capacity"].astype(float),
+        "cap_day": wh["cap_day"].astype(float),
+    })
+    cap_tbl.to_csv(out_dir / f"processing_capacity_daily{mode_suffix}.csv", index=False)
+
     if write_flows:
         flows.to_csv(fn_flows, index=False)
 
-    # Objective components & vehicle utilization
     fixed_cost = sum(wh_fix[j] * (int(round(y[j].value())) if y[j].value() is not None else 0) for j in warehouses)
-    transport_cost = float((flows["km"] * flows["flow"]).sum() * float(veh_cost_per_km))
+
+    flows["truck_km_alloc_total"] = (
+                                            pd.to_numeric(flows["km"], errors="coerce").fillna(0.0)
+                                            * float(routing_efficiency)
+                                            / max(float(veh_capacity), 1.0)
+                                    ) * pd.to_numeric(flows["flow"], errors="coerce").fillna(0.0)
+
+    transport_cost = float(flows["truck_km_alloc_total"].sum() * float(veh_cost_per_km))
     late_orders_expected = float(flows["expected_late"].sum())
     late_penalty_cost = late_penalty * late_orders_expected
 
@@ -847,7 +798,6 @@ def build_and_solve(
     pd.DataFrame(vutil_rows).to_csv(fn_vutil, index=False)
 
 
-    # Console summary
     open_new = pd.DataFrame(open_rows)
     open_new = open_new[(open_new["is_existing"]==0) & (open_new["open"]==1)]
     tot_late = int(round(late_orders_expected))
@@ -950,12 +900,15 @@ def main():
                     help="Use day1 demand or mean over the modeled horizon as baseline arrivals per locker.")
     ap.add_argument("--steady-init-if-missing", action="store_true",
                     help="If no locker_init_col, set S0≈min(C, Abar*E[D]) using per-locker g.")
+    ap.add_argument("--capacity-mult", type=float, default=3.0,
+                    help="Multiplier m for horizon processing capacity: "
+                         "capacity = rate_per_hour * hours_per_day * days * m. "
+                         "Daily cap is then capacity/days = rate_per_hour * hours_per_day * m.")
     args = ap.parse_args()
 
-    args = ap.parse_args()
 
     g_probs = None
-    g_per_locker = None  # <-- ensure it's always defined
+    g_per_locker = None
 
     if args.pickup_delay_probs:
         try:
@@ -963,18 +916,20 @@ def main():
             total = sum(x for x in raw if x >= 0.0)
             if total <= 0:
                 raise ValueError("nonpositive sum")
-            g_probs = [max(0.0, x) / total for x in raw]  # normalized
+            g_probs = [max(0.0, x) / total for x in raw]
         except Exception as e:
             raise SystemExit(f"--pickup-delay-probs parsing error: {e}. "
                              f"Example: --pickup-delay-probs 0.6,0.25,0.1,0.05")
 
-    # Load per-locker CSV *independently* of --pickup-delay-probs
     if args.pickup_delay_csv:
         g_per_locker = load_pickup_delay_csv(Path(args.pickup_delay_csv))
 
     out_dir = Path(args.out_dir)
-    wh = load_warehouses(Path(args.wh_existing), Path(args.wh_candidates),
-                         hours_per_day=args.hours_per_day, days=args.days)
+    wh = load_warehouses(
+        Path(args.wh_existing), Path(args.wh_candidates),
+        hours_per_day=args.hours_per_day, days=args.days,
+        capacity_mult=args.capacity_mult
+    )
 
     # Load lockers + time-phased demand
     lk, demand_day, days_list, S0 = load_lockers_and_demand_timephased(
@@ -1018,8 +973,8 @@ def main():
             raise SystemExit(f"--capacity-col '{col}' not found. Columns: {list(wh.columns)}")
         cap_override = pd.to_numeric(wh[col], errors="coerce")
         wh["capacity"] = cap_override.where(cap_override.notna(), wh["capacity"]).astype(float)
+        wh["cap_day"] = wh["capacity"].astype(float) / max(1.0, float(args.days))
 
-    # Optionally scale processing capacity by (1 - utilization)
     if args.utilization_col:
         ucol = args.utilization_col
         if ucol not in wh.columns:
@@ -1031,6 +986,8 @@ def main():
             wh.loc[mask, "capacity"] = (wh.loc[mask, "capacity"].astype(float) * free_frac[mask]).round(2)
         else:
             wh["capacity"] = (wh["capacity"].astype(float) * free_frac).round(2)
+        wh["cap_day"] = wh["capacity"].astype(float) / max(1.0, float(args.days))
+
 
     build_and_solve(
         wh, lk, demand_day, days_list, S0,

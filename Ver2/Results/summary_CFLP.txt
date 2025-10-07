@@ -1,25 +1,25 @@
-Opened new candidates: 1 -> ['NW_1']
+Opened new candidates: 0 -> (none)
 Total demand (orders): 49999
-Served: 49995 | Unserved: 4  → Service level: 99.99%
-Demand-weighted avg distance on served (km): 14.86
-95th percentile distance (served-weighted) (km): 18.25
-Expected late orders (on served): 2092
-Expected late rate (share of served): 4.185%
+Served: 49999 | Unserved: 0  → Service level: 100.00%
+Demand-weighted avg distance on served (km): 31.32
+95th percentile distance (served-weighted) (km): 77.98
+Expected late orders (on served): 2172
+Expected late rate (share of served): 4.343%
 
 Top warehouses by served volume:
-  - Barkarby Hub (NW_1): 48068 orders
-  - Stockholm Hub (EW_1): 1927 orders
+  - Stockholm Hub (EW_1): 44218 orders
+  - Eskilstuna FC (EW_2): 5780 orders
 
 Top warehouses by expected late orders:
-  - Barkarby Hub (NW_1): 2019 late / 48068 served (4.20%)
-  - Stockholm Hub (EW_1): 73 late / 1927 served (3.80%)
+  - Stockholm Hub (EW_1): 1680 late / 44218 served (3.80%)
+  - Eskilstuna FC (EW_2): 491 late / 5780 served (8.50%)
 
-Closest performer (by avg km on served): Barkarby Hub avg 14.54 km
-Farthest performer (by avg km on served): Stockholm Hub avg 22.97 km
+Closest performer (by avg km on served): Stockholm Hub avg 25.29 km
+Farthest performer (by avg km on served): Eskilstuna FC avg 77.46 km
 
 Locker congestion:
   - Mode detected: fixed-cap
-  - Total overflow parcels (week): 275
+  - Total overflow parcels (week): 278
   - Lockers with any overflow: 51 / 180 (28.3%)
   - Clearance util (sum cleared / sum cap): 0.59x
   - See locker_overflow_top_CFLP.csv for worst offenders
@@ -27,16 +27,16 @@ Locker congestion:
   - See vehicle_utilization_summary_CFLP.csv for per-site aggregates
 
 Vehicle-time utilization:
-  - Days with >100% utilization: 0
-  - Peak site: Barkarby Hub (NW_1) → max util 0.36x
+  - Days with >100% utilization: 3
+  - Peak site: Stockholm Hub (EW_1) → max util 1.00x
   - See vehicle_utilization_peaks_CFLP.csv
 
 Objective breakdown (SEK):
-  - OPEX (horizon): 2,100,000.00
-  - Fixed cost: 815,068.49
-  - Transport cost: 7,408,174.97
-  - Late orders (expected): 2093
-  - Late penalty (@ 500 SEK/order): 1,046,489.40
-  - Unserved orders: 4 → penalty: 16,210.53
-  - Overflow parcels: 275 → penalty: 1,373,098.59
-  => Total objective: 12,759,041.98
+  - OPEX (horizon): 3,161,290.32
+  - Fixed cost: 0.00
+  - Transport cost: 234,481.07
+  - Late orders (expected): 2169
+  - Late penalty (@ 200 SEK/order): 433,736.35
+  - Unserved orders: 0 → penalty: 0.00
+  - Overflow parcels: 278 → penalty: 27,769.97
+  => Total objective: 3,857,277.71

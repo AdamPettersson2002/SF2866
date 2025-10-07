@@ -1,48 +1,20 @@
 #!/usr/bin/env python3
 """
-analyze_solution.py — Summarize & visualize facility-location results (CFLP or UFLP).
-
-Inputs (give explicit files; defaults point to CFLP):
-  --open     Results/open_decisions_CFLP.csv
-  --assign   Results/assignments_summary_CFLP.csv
-  --lockers  Data/lockers_real.csv
-  --flows    (optional) Results/flows_CFLP.csv  -> enables vehicle-time analytics
-  --outdir   Results
-  --title    "Assignment"
-  --suffix   (optional) force output suffix, e.g. "_UFLP" or "_CFLP".
-             If omitted, we detect from --open/--assign filenames: "_UFLP" or "_CFLP".
-             If neither suffix is found, we use "" (no suffix).
-
-Outputs in --outdir (suffix auto-applied):
-  - summary{SUFFIX}.txt
-  - demand_by_warehouse{SUFFIX}.csv
-  - distance_stats{SUFFIX}.csv
-  - distance_hist{SUFFIX}.png
-  - demand_share_bar{SUFFIX}.png
-  - assignment_map{SUFFIX}.png
-  - late_by_warehouse{SUFFIX}.csv
-  - late_stats{SUFFIX}.csv
-  - vehicle_utilization{SUFFIX}.csv              (if --flows provided)
-
-Optional vehicle-time parameters (used only if --flows is present):
-  --vehicle-speed-kmh        default 15
-  --routing-efficiency       default 1.3
-  --service-min-per-order    default 0
-  --vehicles-per-warehouse   default 20
-  --shift-hours              default 12
-
+Example:
 python analyze_solution.py `
   --open Results/open_decisions_CFLP.csv `
   --assign Results/assignments_summary_CFLP.csv `
   --lockers Data/lockers_real.csv `
   --flows Results/flows_CFLP.csv `
   --vehicle-speed-kmh 15 `
-  --routing-efficiency 1.3 `
+  --routing-efficiency 1.5 `
   --service-min-per-order 0 `
-  --vehicles-per-warehouse 20 `
-  --shift-hours 12 `
---congestion Results/locker_congestion_CFLP.csv `
+  --vehicles-per-warehouse 10 `
+  --shift-hours 8 `
+  --congestion Results/locker_congestion_CFLP.csv `
   --vutil Results/vehicle_utilization_CFLP.csv `
+  --title "Optimal solution with existing warehouses" `
+  --no-title-suffix `
   --outdir Results
 """
 
@@ -87,10 +59,8 @@ def main():
     ap.add_argument("--flows", default=None,
                     help="(Optional) flows CSV from optimizer. Enables vehicle-time analytics.")
     ap.add_argument("--outdir", default="Results", help="Output folder.")
-    ap.add_argument("--title",  default="Assignment", help="Plot titles.")
     ap.add_argument("--suffix", default=None,
                     help="Force output filename suffix, e.g. _UFLP or _CFLP. If omitted, inferred from filenames.")
-    # vehicle-time params (used only if --flows is given)
     ap.add_argument("--vehicle-speed-kmh", type=float, default=15.0)
     ap.add_argument("--routing-efficiency", type=float, default=1.3)
     ap.add_argument("--service-min-per-order", type=float, default=0.0)
@@ -98,6 +68,11 @@ def main():
     ap.add_argument("--shift-hours", type=float, default=12.0)
     ap.add_argument("--congestion", default=None, help="locker_congestion CSV from optimizer")
     ap.add_argument("--vutil", default=None, help="vehicle_utilization CSV from optimizer")
+    ap.add_argument("--title", default="Assignment", help="Base plot title text.")
+    ap.add_argument("--no-title-suffix", action="store_true",
+                    help="Do not append the _CFLP/_UFLP suffix to the plot titles.")
+    ap.add_argument("--hotspots-lockers-only", action="store_true",
+                    help="Plot only overflow lockers (no warehouse markers) and fit bounds to lockers.")
     args = ap.parse_args()
 
     # Decide suffix
@@ -106,6 +81,9 @@ def main():
     else:
         suffix = detect_suffix(args.open, args.assign)
 
+    title_suffix = "" if args.no_title_suffix else suffix
+    title_text = f"{args.title}{title_suffix}"
+
     outdir = Path(args.outdir); outdir.mkdir(parents=True, exist_ok=True)
 
     # Load inputs
@@ -113,7 +91,6 @@ def main():
     asg = pd.read_csv(args.assign)
     lockers = pd.read_csv(args.lockers)
 
-    # --- OPEX fallback (sum from open_decisions if needed later) ---
     fallback_opex = None
     try:
         if "opex_horizon_sek" in open_df.columns and "open" in open_df.columns:
@@ -262,20 +239,17 @@ def main():
         lines.append(f"Closest performer (by avg km on served): {closest['assigned_warehouse_name']} avg {closest['avg_km_served_wt']:.2f} km")
         lines.append(f"Farthest performer (by avg km on served): {farthest['assigned_warehouse_name']} avg {farthest['avg_km_served_wt']:.2f} km")
 
-    # Locker congestion (optional)
+    # Locker congestion
     if args.congestion:
         try:
             cong = pd.read_csv(args.congestion)
 
-            # Coerce numerics safely
             num_cols = ["overflow", "S_end", "cleared_actual", "capacity", "clear_capacity", "clear_per_day",
                         "expected_cleared", "expected_pickups", "w_hat"]
             for c in num_cols:
                 if c in cong.columns:
                     cong[c] = pd.to_numeric(cong[c], errors="coerce").fillna(0.0)
 
-            # Detect clearance mode
-            # Pickup-delay mode will write an expectation column under one of these names:
             expected_col = None
             for cand in ["expected_cleared", "expected_pickups", "w_hat"]:
                 if cand in cong.columns:
@@ -294,7 +268,7 @@ def main():
                 if "overflow" in cong.columns else 0
             n_lockers = cong["locker_id"].nunique()
 
-            # ----- Per-locker hot spots (top offenders) -----
+            # ----- Per-locker hot spots -----
             agg_cols = {
                 "total_overflow": ("overflow", "sum"),
                 "days_overflow": ("overflow", lambda s: int((s > 0).sum())),
@@ -311,7 +285,6 @@ def main():
                        .agg(**agg_cols)
                        .sort_values(["total_overflow", "days_overflow"], ascending=False)
                        .head(15))
-            # Derived ratios
             if has_fixed_cap and "clear_capacity" in top_hot.columns:
                 top_hot["clear_utilization"] = np.where(top_hot["clear_capacity"] > 0,
                                                         top_hot["avg_cleared"] / top_hot["clear_capacity"], np.nan)
@@ -342,7 +315,7 @@ def main():
                                                      clr["avg_cleared"] / clr["avg_expected"], np.nan)
             clr.to_csv(outdir / f"clearance_summary{suffix}.csv", index=False)
 
-            # ----- (Optional) daily time-series wide export for diagnostics -----
+            # ----- daily time-series wide export for diagnostics -----
             # Produces locker/day with cleared vs expected and overflow; harmless if expected_col is None.
             ts_cols = ["day", "locker_id", "cleared_actual", "overflow", "S_end", "capacity"]
             if has_fixed_cap: ts_cols.append("clear_capacity")
@@ -358,7 +331,6 @@ def main():
             lines.append(f"  - Lockers with any overflow: {lockers_any_overflow} / {n_lockers} "
                          f"({(lockers_any_overflow / max(1, n_lockers)):.1%})")
             if expected_col:
-                # Overall realization ratio (cleared vs expected)
                 overall_expected = float(cong[expected_col].sum())
                 overall_cleared = float(cong["cleared_actual"].sum())
                 if overall_expected > 0:
@@ -408,11 +380,10 @@ def main():
         except Exception as e:
             print(f"[vutil] skipped: {e}")
 
-    # Objective breakdown (if the optimizer wrote it)
+    # Objective breakdown
     obj_path = outdir / f"objective_breakdown{suffix}.csv"
     if obj_path.exists():
         obj = pd.read_csv(obj_path).iloc[0]
-        # numeric coercion for safety
         def num(x):
             try: return float(x)
             except: return 0.0
@@ -429,7 +400,7 @@ def main():
         overflow_total = num(obj.get("overflow_total", 0.0))
         overflow_cost = num(obj.get("overflow_penalty_sek", 0.0))
 
-        # OPEX (either from objective_breakdown, or fallback from open_decisions)
+        # OPEX
         if "opex_sek" in obj:
             opex_cost = num(obj["opex_sek"])
             lines.append(f"  - OPEX (horizon): {opex_cost:,.2f}")
@@ -466,7 +437,7 @@ def main():
         "overall_late_rate_on_served": float(overall_late_rate),
     }]).to_csv(outdir / f"late_stats{suffix}.csv", index=False)
 
-    # ---------- Plots (matplotlib only, no seaborn) ----------
+    # ---------- Plots ----------
     import matplotlib.pyplot as plt
 
     # 1) Histogram
@@ -476,7 +447,7 @@ def main():
              bins=30, weights=dfh["served"].values, edgecolor="black")
     plt.xlabel("Distance to assigned warehouse (km)")
     plt.ylabel("Orders (served-weighted)")
-    plt.title(f"Distance distribution — {args.title}{suffix}")
+    plt.title(f"Distance distribution — {title_text}")
     fig.tight_layout()
     fig.savefig(outdir / f"distance_hist{suffix}.png", dpi=200)
     plt.close(fig)
@@ -486,7 +457,7 @@ def main():
     plt.bar(dem_by_wh["assigned_warehouse_name"].astype(str), dem_by_wh["served"].astype(float))
     plt.xticks(rotation=45, ha="right")
     plt.ylabel("Orders served")
-    plt.title(f"Served volume per warehouse — {args.title}{suffix}")
+    plt.title(f"Served volume per warehouse — {title_text}")
     fig.tight_layout()
     fig.savefig(outdir / f"demand_share_bar{suffix}.png", dpi=220)
     plt.close(fig)
@@ -535,7 +506,7 @@ def main():
                         fontsize=9, weight="bold",
                         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.8), zorder=6)
 
-        ax.set_title(f"{args.title}{suffix}")
+        ax.set_title(title_text)
         ax.set_axis_off()
         fig.tight_layout()
         fig.savefig(outdir / f"assignment_map{suffix}.png", dpi=230)
@@ -544,6 +515,139 @@ def main():
         print("[map] skipped:", e)
 
     print(f"Done. Wrote outputs with suffix '{suffix}' to {outdir}")
+    # 4) Overflow hotspots map (optionally lockers-only)
+    try:
+        import geopandas as gpd
+        from shapely.geometry import Point
+        try:
+            import contextily as cx
+        except Exception:
+            cx = None
+
+        HOT_N = 30  # plot top-N overflow lockers
+        LABEL_TOP = 10  # annotate this many worst lockers
+        MIN_OVERFLOW = 0.0
+
+        top_path = outdir / f"locker_overflow_top{suffix}.csv"
+        hot = None
+        if top_path.exists():
+            hot = pd.read_csv(top_path)
+            if "total_overflow" not in hot.columns and "overflow" in hot.columns:
+                hot = hot.rename(columns={"overflow": "total_overflow"})
+
+        if hot is None and args.congestion:
+            try:
+                cong = pd.read_csv(args.congestion)
+                if "overflow" not in cong.columns:
+                    raise RuntimeError("No 'overflow' column in congestion file.")
+                for c in ("overflow", "S_end", "clear_capacity", "cleared_actual", "capacity"):
+                    if c in cong.columns:
+                        cong[c] = pd.to_numeric(cong[c], errors="coerce").fillna(0.0)
+                hot = (cong.groupby("locker_id", as_index=False)
+                       .agg(total_overflow=("overflow", "sum"),
+                            days_overflow=("overflow", lambda s: int((s > 0).sum()))))
+            except Exception:
+                hot = None
+
+        if hot is None or hot.empty:
+            raise RuntimeError("No overflow data found (locker_overflow_top or congestion).")
+
+        # filter & take top-N
+        hot = hot[pd.to_numeric(hot["total_overflow"], errors="coerce").fillna(0.0) > float(MIN_OVERFLOW)].copy()
+        hot = hot.sort_values("total_overflow", ascending=False).head(HOT_N)
+
+        # join locker coords
+        lid_col = pick(lockers, ["locker_id", "id"])
+        lat_col = pick(lockers, ["lat", "latitude"])
+        lon_col = pick(lockers, ["lon", "longitude"])
+        lk_coords = lockers[[lid_col, lat_col, lon_col]].copy()
+        lk_coords.columns = ["locker_id", "lat", "lon"]
+
+        hot = hot.merge(lk_coords, on="locker_id", how="left")
+        hot = hot.dropna(subset=["lat", "lon"])
+
+        gdf_hot = gpd.GeoDataFrame(
+            hot[["locker_id", "total_overflow"]],
+            geometry=[Point(xy) for xy in zip(hot["lon"], hot["lat"])],
+            crs="EPSG:4326"
+        ).to_crs(epsg=3857)
+
+        # optionally load open sites (for reference) unless lockers-only
+        gdf_sites = None
+        if not args.hotspots_lockers_only:
+            open_sites = open_df.query("open == 1").copy()
+            if not open_sites.empty:
+                gdf_sites = gpd.GeoDataFrame(
+                    open_sites[["warehouse_id", "name", "is_existing", "open", "lat", "lon"]],
+                    geometry=[Point(xy) for xy in zip(open_sites["lon"], open_sites["lat"])],
+                    crs="EPSG:4326"
+                ).to_crs(epsg=3857)
+
+        # map bounds: lockers only if lockers-only, else include sites
+        if gdf_sites is not None and len(gdf_sites):
+            all_bounds = pd.concat([gdf_hot.geometry, gdf_sites.geometry], ignore_index=True).total_bounds
+        else:
+            all_bounds = gdf_hot.total_bounds
+
+        fig, ax = plt.subplots(figsize=(8, 10))
+        padx = (all_bounds[2] - all_bounds[0]) * 0.08 or 1000
+        pady = (all_bounds[3] - all_bounds[1]) * 0.08 or 1000
+        ax.set_xlim(all_bounds[0] - padx, all_bounds[2] + padx)
+        ax.set_ylim(all_bounds[1] - pady, all_bounds[3] + pady)
+        ax.set_aspect('equal')
+
+        if cx is not None:
+            cx.add_basemap(ax, source=cx.providers.OpenStreetMap.Mapnik, attribution_size=6)
+
+        # plot lockers
+        smin, smax = 30, 250
+        ov = gdf_hot["total_overflow"].astype(float)
+        if ov.max() > ov.min():
+            sizes = smin + (ov - ov.min()) / (ov.max() - ov.min()) * (smax - smin)
+        else:
+            sizes = pd.Series([smin] * len(gdf_hot), index=gdf_hot.index)
+
+        gdf_hot.plot(ax=ax, markersize=sizes, alpha=0.85, color="tab:orange",
+                     edgecolor="black", linewidth=0.5, zorder=5)
+
+        # annotate worst lockers
+        lab = gdf_hot.sort_values("total_overflow", ascending=False).head(LABEL_TOP)
+        for _, r in lab.iterrows():
+            ax.annotate(f"{r['locker_id']} ({int(round(r['total_overflow']))})",
+                        (r.geometry.x, r.geometry.y),
+                        xytext=(6, 6), textcoords="offset points",
+                        fontsize=8, weight="bold",
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.8),
+                        zorder=7)
+
+        # optionally plot sites
+        if gdf_sites is not None and len(gdf_sites):
+            gdf_sites_exist = gdf_sites[gdf_sites["is_existing"] == 1]
+            gdf_sites_new = gdf_sites[gdf_sites["is_existing"] == 0]
+            gdf_sites_exist.plot(ax=ax, markersize=140, marker="o",
+                                 facecolor="none", edgecolor="tab:red", linewidth=2.0, zorder=6)
+            gdf_sites_new.plot(ax=ax, markersize=140, marker="s",
+                               facecolor="none", edgecolor="tab:blue", linewidth=2.0, zorder=6)
+            for _, r in gdf_sites.iterrows():
+                kind = "Existing" if int(r["is_existing"]) == 1 else "New"
+                ax.annotate(f"{r['name']} ({r['warehouse_id']})\n{kind}",
+                            (r.geometry.x, r.geometry.y),
+                            xytext=(8, 8), textcoords="offset points",
+                            fontsize=9, weight="bold",
+                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.8),
+                            zorder=7)
+
+        title_part = "Overflow Hotspots" if args.hotspots_lockers_only else "Open Sites + Overflow Hotspots"
+        ax.set_title(f"{title_text} — {title_part}")
+        ax.set_axis_off()
+        fig.tight_layout()
+        out_map = outdir / f"open_hotspots_map{suffix}.png"
+        fig.savefig(out_map, dpi=230)
+        plt.close(fig)
+        print(f"Wrote: {out_map.name}")
+
+    except Exception as e:
+        print("[open+hotspots map] skipped:", e)
 
 if __name__ == "__main__":
     main()

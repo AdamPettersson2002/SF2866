@@ -1,0 +1,2 @@
+fixed_cost_sek,opex_sek,transport_cost_sek,late_orders_expected,late_penalty_per_order,late_penalty_sek,unserved_orders_total,unserved_penalty_per_order,unserved_penalty_sek,overflow_total,overflow_penalty_per_parcel,overflow_penalty_sek,objective_total_sek
+1563013.7,5283870.9677419355,156262.08025502853,2354.7584,200.0,470951.68000000005,0.0,2000.0,0.0,277.6997185199943,100.0,27769.971851999428,7501868.399848964

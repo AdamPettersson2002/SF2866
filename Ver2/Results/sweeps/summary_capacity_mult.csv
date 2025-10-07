@@ -1,0 +1,6 @@
+opened_new_sites,objective_total_sek,late_orders_expected,overflow_total,lockers_any_overflow_share,overflow_share_of_demand,service_level,total_demand,total_served,total_unserved,sweep_flag,sweep_value,out_dir
+Barkarby Hub (NW_1); Tumba Depot (NW_2),7501868.399848964,2354.7584,277.6997185199943,0.2833333333333333,0.005553994370399886,1.0,50000.0,50000.0,0.0,--capacity-mult,1,Results\sweeps\capacity_mult_1
+Tumba Depot (NW_2),3445480.444617455,2235.8591999999985,277.699718023,0.2833333333333333,0.00555399436046,1.0,50000.0,50000.0,0.0,--capacity-mult,2,Results\sweeps\capacity_mult_2
+Tumba Depot (NW_2),3415632.818051047,2011.9162810788969,277.6997176599943,0.2833333333333333,0.005553994353199886,0.999999999992,50000.0,49999.9999996,0.0,--capacity-mult,3,Results\sweeps\capacity_mult_3
+Barkarby Hub (NW_1),2455238.9512280314,2100.000000000002,277.699717773,0.2833333333333333,0.00555399435546,1.0,50000.0,50000.0,0.0,--capacity-mult,4,Results\sweeps\capacity_mult_4
+Barkarby Hub (NW_1),2455238.9512280314,2100.000000000002,277.699717773,0.2833333333333333,0.00555399435546,1.0,50000.0,50000.0,0.0,--capacity-mult,5,Results\sweeps\capacity_mult_5

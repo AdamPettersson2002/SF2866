@@ -1,7 +1,7 @@
 warehouse_id,name,utilization
-NW_1,Barkarby Hub,0.3628281454471816
-EW_1,Stockholm Hub,0.0284581188142181
-EW_2,Eskilstuna FC,0.0
+EW_1,Stockholm Hub,1.0000000000489837
+EW_2,Eskilstuna FC,0.4335942118076877
+NW_1,Barkarby Hub,0.0
 NW_10,Värmdö FC,0.0
 NW_2,Tumba Depot,0.0
 NW_3,Sollentuna FC,0.0
